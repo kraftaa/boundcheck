@@ -2,6 +2,7 @@
   "name": "openai-agents-python",
   "description": "OpenAI Agents SDK for Python (openai-agents) using OpenAIChatCompletionsModel and MCPServerStdio. Launch with adapters/openai-agents-python/agent.py.",
   "provider_protocol": "openai-chat-completions",
+  "capabilities": ["history-replay", "persistence-resume"],
   "environment": {
     "OPENAI_BASE_URL": "{{provider_base_url}}",
     "OPENAI_API_KEY": "boundarycheck-test-key",
@@ -9,7 +10,13 @@
     "BOUNDARYCHECK_MCP_COMMAND": "{{mcp_command}}",
     "BOUNDARYCHECK_MCP_ARGS": "{{mcp_args_json}}",
     "BOUNDARYCHECK_PROMPT": "{{scenario_prompt}}",
-    "BOUNDARYCHECK_RUNTIME_INFO": "{{runtime_info_path}}"
+    "BOUNDARYCHECK_SCENARIO_ID": "{{scenario_id}}",
+    "BOUNDARYCHECK_RUNTIME_INFO": "{{runtime_info_path}}",
+    "BOUNDARYCHECK_SESSION_DB": "{{workdir}}/agents-session.sqlite",
+    "BOUNDARYCHECK_SESSION_ID": "{{run_id}}-{{scenario_id}}"
+  },
+  "resume": {
+    "environment": { "BOUNDARYCHECK_RESUME": "1" }
   },
   "readiness": { "type": "provider-request", "timeout_seconds": 60 },
   "completion": { "type": "provider-scenario-complete", "exit_grace_seconds": 10 },

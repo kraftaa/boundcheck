@@ -12,19 +12,23 @@ use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
+#[derive(Clone)]
 pub struct McpServer {
     run_id: String,
     scenario: String,
     evidence: PathBuf,
-    seq: u64,
+    seq: Arc<AtomicU64>,
 }
 
 pub fn serve(run_id: String, scenario: String, evidence: PathBuf) -> i32 {
-    let mut server = McpServer { run_id, scenario, evidence, seq: 0 };
-    match server.run(io::stdin().lock(), io::stdout().lock()) {
+    let server = McpServer { run_id, scenario, evidence, seq: Arc::new(AtomicU64::new(0)) };
+    match server.run(io::stdin().lock(), io::stdout()) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("boundarycheck mcp-server: {e}");
@@ -34,7 +38,7 @@ pub fn serve(run_id: String, scenario: String, evidence: PathBuf) -> i32 {
 }
 
 impl McpServer {
-    fn run(&mut self, input: impl BufRead, mut output: impl Write) -> io::Result<()> {
+    fn run(&self, input: impl BufRead, mut output: impl Write + Send) -> io::Result<()> {
         let seq = self.next_seq();
         self.record(McpEvidence {
             event: "session-start".into(),
@@ -47,37 +51,59 @@ impl McpServer {
             generated: false,
             response_b64: None,
         })?;
-        let mut input = input;
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            if input.read_until(b'\n', &mut line)? == 0 {
-                return Ok(()); // EOF: clean termination
-            }
-            let trimmed = trim(&line);
-            if trimmed.is_empty() {
-                continue;
-            }
-            let msg: Value = match serde_json::from_slice(trimmed) {
-                Ok(v) => v,
-                Err(e) => {
-                    let resp = error_response(Value::Null, -32700, &format!("parse error: {e}"));
-                    write_line(&mut output, &resp)?;
+        std::thread::scope(|scope| {
+            let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>();
+            let writer = scope.spawn(move || -> io::Result<()> {
+                for response in rx {
+                    write_line(&mut output, &response?)?;
+                }
+                Ok(())
+            });
+            let mut input = input;
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                if input.read_until(b'\n', &mut line)? == 0 {
+                    break;
+                }
+                let trimmed = trim(&line);
+                if trimmed.is_empty() {
                     continue;
                 }
-            };
-            if let Some(resp) = self.handle(&msg)? {
-                write_line(&mut output, &resp)?;
+                let msg: Value = match serde_json::from_slice(trimmed) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tx.send(Ok(error_response(Value::Null, -32700, &format!("parse error: {e}"))))
+                            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "MCP writer stopped"))?;
+                        continue;
+                    }
+                };
+                if msg.get("method").and_then(Value::as_str) == Some("tools/call") {
+                    let (server, tx) = (self.clone(), tx.clone());
+                    scope.spawn(move || match server.handle(&msg) {
+                        Ok(Some(response)) => {
+                            let _ = tx.send(Ok(response));
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            let _ = tx.send(Err(error));
+                        }
+                    });
+                } else if let Some(response) = self.handle(&msg)? {
+                    tx.send(Ok(response))
+                        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "MCP writer stopped"))?;
+                }
             }
-        }
+            drop(tx);
+            writer.join().map_err(|_| io::Error::other("MCP writer thread panicked"))?
+        })
     }
 
-    fn next_seq(&mut self) -> u64 {
-        self.seq += 1;
-        self.seq
+    fn next_seq(&self) -> u64 {
+        self.seq.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    fn handle(&mut self, msg: &Value) -> io::Result<Option<Vec<u8>>> {
+    fn handle(&self, msg: &Value) -> io::Result<Option<Vec<u8>>> {
         let id = msg.get("id").cloned();
         let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
         let Some(id) = id else {
@@ -111,7 +137,7 @@ impl McpServer {
         Ok(Some(encode(&json!({"jsonrpc": "2.0", "id": id, "result": result}))))
     }
 
-    fn tools_call(&mut self, id: Value, params: &Value) -> io::Result<Vec<u8>> {
+    fn tools_call(&self, id: Value, params: &Value) -> io::Result<Vec<u8>> {
         let name = params.get("name").and_then(Value::as_str).unwrap_or("");
         if name != TOOL_NAME {
             return Ok(error_response(id, -32602, &format!("unknown tool: {name}")));
@@ -119,6 +145,12 @@ impl McpServer {
         let args = params.get("arguments").cloned().unwrap_or(Value::Null);
         let field = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_owned);
         let call_id = field("call_id");
+        // Both calls are already in flight when this delay runs. Delaying A
+        // deterministically makes B finish first and exercises association
+        // independently of request/completion order.
+        if self.scenario == "concurrent-two-tools" && call_id.as_deref() == Some(crate::scenario::CALL_1) {
+            std::thread::sleep(Duration::from_millis(75));
+        }
         let generated = match (field("run_id"), field("scenario"), &call_id) {
             (Some(r), Some(s), Some(c)) if r == self.run_id && s == self.scenario => payload::generate(&r, &s, c),
             _ => None,
@@ -200,7 +232,7 @@ fn trim(b: &[u8]) -> &[u8] {
 /// processes (runtimes may spawn more than one) never interleave records.
 fn append_locked(path: &Path, line: &[u8]) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
-    let mut f = OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
+    let mut f = OpenOptions::new().create(true).append(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path)?;
     let fd = f.as_raw_fd();
     unsafe { libc::flock(fd, libc::LOCK_EX) };
     let mut buf = line.to_vec();
@@ -218,8 +250,12 @@ mod tests {
     fn records_evidence_before_responding() {
         let dir = tempfile::tempdir().unwrap();
         let ev = dir.path().join("ev.jsonl");
-        let mut s =
-            McpServer { run_id: "BC_RUN_000001".into(), scenario: "exact-text".into(), evidence: ev.clone(), seq: 0 };
+        let s = McpServer {
+            run_id: "BC_RUN_000001".into(),
+            scenario: "exact-text".into(),
+            evidence: ev.clone(),
+            seq: Arc::new(AtomicU64::new(0)),
+        };
         let input = concat!(
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
             "\n",
@@ -238,5 +274,43 @@ mod tests {
         let raw = base64::engine::general_purpose::STANDARD.decode(recs[1].response_b64.as_ref().unwrap()).unwrap();
         assert_eq!(raw, lines[1], "evidence holds exactly the bytes written to stdout");
         assert!(recs[1].generated);
+    }
+
+    #[test]
+    fn concurrent_calls_can_finish_in_reverse_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let ev = dir.path().join("ev.jsonl");
+        let s = McpServer {
+            run_id: "BC_RUN_000001".into(),
+            scenario: "concurrent-two-tools".into(),
+            evidence: ev,
+            seq: Arc::new(AtomicU64::new(0)),
+        };
+        let call = |id: u64, call_id: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"boundary_test","arguments":{{"run_id":"BC_RUN_000001","scenario":"concurrent-two-tools","call_id":"{call_id}"}}}}}}"#
+            )
+        };
+        let input = format!("{}\n{}\n", call(1, crate::scenario::CALL_1), call(2, crate::scenario::CALL_2));
+        let mut out = Vec::new();
+        s.run(input.as_bytes(), &mut out).unwrap();
+        let ids: Vec<u64> = out
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<Value>(line).unwrap()["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![2, 1]);
+    }
+
+    #[test]
+    fn evidence_append_refuses_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"private").unwrap();
+        let link = dir.path().join("evidence");
+        symlink(&target, &link).unwrap();
+        assert!(append_locked(&link, b"evidence").is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"private");
     }
 }
