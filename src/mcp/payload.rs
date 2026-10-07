@@ -69,6 +69,10 @@ pub fn generate(run_id: &str, scenario_id: &str, call_id: &str) -> Option<Payloa
             text(format!("{head}|step={step}|history must keep this result exactly once"))
         }
         "retry-429" => text(format!("{head}|retry payload: unchanged across HTTP retries \u{2713}")),
+        "replay-history" => text(format!("{head}|replay payload: unchanged across history replay \u{2713}")),
+        "persistence-resume" => {
+            text(format!("{head}|persisted payload: unchanged across process restart and resume \u{2713}"))
+        }
         "unicode-boundaries" => text(format!("{head}|{}", unicode_text())),
         "mcp-error" => Some(Payload {
             text: format!("{head}|error: deterministic tool failure (code BC_E_042)"),

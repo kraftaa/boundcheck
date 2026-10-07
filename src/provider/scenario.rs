@@ -10,7 +10,7 @@
 use crate::model::verdict::{UnknownNote, UnknownReason};
 use crate::provider::protocol::{self, ParsedRequest, PlannedCall};
 use crate::provider::recorder::{RequestRecord, RequestRole};
-use crate::scenario::{self, ScenarioDef, FINAL_TEXT, TOOL_NAME};
+use crate::scenario::{self, ReplayMode, ScenarioDef, CHECKPOINT_TEXT, FINAL_TEXT, REPLAY_TEXT, TOOL_NAME};
 use serde_json::Value;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,6 +18,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 pub enum Phase {
     AwaitInitial,
     AwaitResults { turn: usize },
+    AwaitReplay { resumed: bool },
     Complete,
     Aborted,
 }
@@ -27,6 +28,13 @@ impl Phase {
         match self {
             Phase::AwaitInitial => "WAIT_INITIAL_REQUEST".into(),
             Phase::AwaitResults { turn } => format!("WAIT_TOOL_RESULT(turn={})", turn + 1),
+            Phase::AwaitReplay { resumed } => {
+                if *resumed {
+                    "WAIT_RESUMED_HISTORY".into()
+                } else {
+                    "WAIT_REPLAYED_HISTORY".into()
+                }
+            }
             Phase::Complete => "COMPLETE".into(),
             Phase::Aborted => "ABORTED".into(),
         }
@@ -245,10 +253,20 @@ impl ScenarioMachine {
                 }
                 if turn + 1 < self.def.turns.len() {
                     self.issue_turn(rec, req, turn + 1)
+                } else if self.def.replay != ReplayMode::None {
+                    let resumed = self.def.replay == ReplayMode::Resume;
+                    self.phase = Phase::AwaitReplay { resumed };
+                    let marker = if resumed { CHECKPOINT_TEXT } else { REPLAY_TEXT };
+                    self.marker_answer(rec, req, marker)
                 } else {
                     self.phase = Phase::Complete;
                     self.final_answer(rec, req)
                 }
+            }
+            Phase::AwaitReplay { resumed } => {
+                rec.role = RequestRole::Replay { resumed };
+                self.phase = Phase::Complete;
+                self.final_answer(rec, req)
             }
             Phase::Complete | Phase::Aborted => {
                 rec.role = RequestRole::AfterCompletion;
@@ -291,12 +309,16 @@ impl ScenarioMachine {
     }
 
     fn final_answer(&mut self, rec: &mut RequestRecord, req: &ParsedRequest) -> Reply {
+        self.marker_answer(rec, req, FINAL_TEXT)
+    }
+
+    fn marker_answer(&mut self, rec: &mut RequestRecord, req: &ParsedRequest, text: &str) -> Reply {
         rec.response_kind = "final-answer";
         let model = req.model.as_deref().unwrap_or("boundarycheck-model");
         if req.stream {
-            sse(protocol::final_stream(rec.seq, model, FINAL_TEXT, req.include_usage))
+            sse(protocol::final_stream(rec.seq, model, text, req.include_usage))
         } else {
-            Reply::json(200, &protocol::final_response(rec.seq, model, FINAL_TEXT))
+            Reply::json(200, &protocol::final_response(rec.seq, model, text))
         }
     }
 }
@@ -371,6 +393,21 @@ mod tests {
         );
         assert_eq!(m.requests[2].role, RequestRole::Result { turn: 0, attempt: 2 });
         assert_eq!(m.phase, Phase::Complete);
+    }
+
+    #[test]
+    fn replay_and_resume_require_a_second_history_submission() {
+        for (id, resumed) in [("replay-history", false), ("persistence-resume", true)] {
+            let mut m = ScenarioMachine::new("BC_RUN_000001", scenario::find(id).unwrap());
+            let p = format!("/BC_RUN_000001/{id}/v1/chat/completions");
+            m.handle("POST", &p, body(r#"{"role":"user","content":"go"}"#), false, None);
+            let result = body(r#"{"role":"tool","tool_call_id":"BC_CALL_000001","content":"x"}"#);
+            m.handle("POST", &p, result.clone(), false, None);
+            assert_eq!(m.phase, Phase::AwaitReplay { resumed });
+            m.handle("POST", &p, result, false, None);
+            assert_eq!(m.requests[2].role, RequestRole::Replay { resumed });
+            assert_eq!(m.phase, Phase::Complete);
+        }
     }
 
     #[test]

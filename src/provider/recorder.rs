@@ -11,6 +11,7 @@ pub const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 pub enum RequestRole {
     Initial,
     Result { turn: usize, attempt: u32 },
+    Replay { resumed: bool },
     AfterCompletion,
     Rejected,
     Auxiliary,
@@ -21,6 +22,13 @@ impl RequestRole {
         match self {
             RequestRole::Initial => "initial".into(),
             RequestRole::Result { turn, attempt } => format!("result turn={} attempt={attempt}", turn + 1),
+            RequestRole::Replay { resumed } => {
+                if *resumed {
+                    "replay after resume".into()
+                } else {
+                    "replay same process".into()
+                }
+            }
             RequestRole::AfterCompletion => "after-completion".into(),
             RequestRole::Rejected => "rejected".into(),
             RequestRole::Auxiliary => "auxiliary".into(),

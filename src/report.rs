@@ -123,6 +123,10 @@ pub struct RequestSummary {
 pub struct ProcessReport {
     #[serde(flatten)]
     pub exit: ExitInfo,
+    /// Completed runtime processes before the final one (for resume scenarios).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub prior_exits: Vec<ExitInfo>,
+    pub restarts: usize,
     pub stdout_bytes: u64,
     pub stderr_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]

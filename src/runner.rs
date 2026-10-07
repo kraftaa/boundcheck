@@ -194,6 +194,7 @@ fn run_scenario(
     }
     let env: Vec<(String, String)> =
         a.environment.iter().map(|(k, v)| Ok((k.clone(), vars.render(v)?))).collect::<Result<_, String>>()?;
+    let base_env = a.child_environment(&env);
     let mut argv = cfg.command.clone();
     for x in &a.args {
         argv.push(vars.render(x)?);
@@ -202,12 +203,14 @@ fn run_scenario(
 
     let started = Instant::now();
     let started_at = humantime::format_rfc3339_millis(SystemTime::now()).to_string();
+    let mut active_stdout_path = stdout_path.clone();
+    let mut active_stderr_path = stderr_path.clone();
     let mut child = process::spawn(SpawnSpec {
         argv: &argv,
-        env: &a.child_environment(&env),
+        env: &base_env,
         cwd: &std::env::current_dir().map_err(|e| e.to_string())?,
-        stdout_path: &stdout_path,
-        stderr_path: &stderr_path,
+        stdout_path: &active_stdout_path,
+        stderr_path: &active_stderr_path,
         stdin,
     })
     .map_err(|e| format!("cannot launch runtime command {:?}: {e}", argv.first().map(String::as_str).unwrap_or("")))?;
@@ -218,6 +221,9 @@ fn run_scenario(
     let mut unknowns: Vec<UnknownNote> = vec![];
     let mut done_at: Option<Instant> = None;
     let mut exited_early_in: Option<String> = None;
+    let mut resumed = false;
+    let mut prior_exits = vec![];
+    let mut prior_stream_bytes = (0u64, 0u64);
     loop {
         provider.wait(Duration::from_millis(25));
         let now = Instant::now();
@@ -247,6 +253,53 @@ fn run_scenario(
                 }
                 break;
             }
+            continue;
+        }
+        if exited.is_some() && matches!(phase, Phase::AwaitReplay { resumed: true }) && !resumed {
+            let Some(resume) = &a.resume else {
+                unknowns.push(UnknownNote::new(
+                    UnknownReason::AdapterInsufficient,
+                    "persistence-resume requires an adapter `resume` configuration",
+                ));
+                break;
+            };
+            let first_exit = child.finish(Duration::from_secs_f64(a.shutdown.grace_seconds));
+            prior_stream_bytes.0 += child.stream_bytes.0;
+            prior_stream_bytes.1 += child.stream_bytes.1;
+            if first_exit.exit_code != Some(0) {
+                unknowns.push(UnknownNote::new(
+                    UnknownReason::RuntimeExitedEarly,
+                    format!("checkpoint process ended with {}", first_exit.describe()),
+                ));
+                prior_exits.push(first_exit);
+                break;
+            }
+            prior_exits.push(first_exit);
+            let mut resume_env = base_env.clone();
+            let overrides: Vec<(String, String)> = resume
+                .environment
+                .iter()
+                .map(|(k, v)| Ok((k.clone(), vars.render(v)?)))
+                .collect::<Result<_, String>>()?;
+            resume_env.retain(|(k, _)| !overrides.iter().any(|(r, _)| r == k));
+            resume_env.extend(overrides);
+            let mut resume_argv = argv.clone();
+            for arg in &resume.args {
+                resume_argv.push(vars.render(arg)?);
+            }
+            let resume_stdin = resume.stdin.as_ref().or(a.stdin.as_ref()).map(|s| vars.render(s)).transpose()?;
+            active_stdout_path = dir.join("runtime-resume-stdout.log");
+            active_stderr_path = dir.join("runtime-resume-stderr.log");
+            child = process::spawn(SpawnSpec {
+                argv: &resume_argv,
+                env: &resume_env,
+                cwd: &std::env::current_dir().map_err(|e| e.to_string())?,
+                stdout_path: &active_stdout_path,
+                stderr_path: &active_stderr_path,
+                stdin: resume_stdin,
+            })
+            .map_err(|e| format!("cannot relaunch runtime for resume: {e}"))?;
+            resumed = true;
             continue;
         }
         if exited.is_some() {
@@ -299,7 +352,7 @@ fn run_scenario(
         resolve_runtime(&a.runtime_version, &vars, &runtime_info, runtime);
     }
 
-    let stderr_tail = (eval.verdict == Verdict::Unknown).then(|| process::tail(&stderr_path, 600)).flatten();
+    let stderr_tail = (eval.verdict == Verdict::Unknown).then(|| process::tail(&active_stderr_path, 600)).flatten();
     let mut s = ScenarioReport {
         id: def.id.to_owned(),
         summary: def.summary.to_owned(),
@@ -315,8 +368,10 @@ fn run_scenario(
         state_machine: StateMachineInfo { final_state: eval.final_phase.clone(), calls_issued: machine.issued.clone() },
         process: ProcessReport {
             exit,
-            stdout_bytes: child.stream_bytes.0,
-            stderr_bytes: child.stream_bytes.1,
+            restarts: prior_exits.len(),
+            prior_exits,
+            stdout_bytes: prior_stream_bytes.0 + child.stream_bytes.0,
+            stderr_bytes: prior_stream_bytes.1 + child.stream_bytes.1,
             stderr_tail,
         },
         artifacts: None,
@@ -426,7 +481,7 @@ fn write_artifacts(
             )?;
         }
     }
-    for log in ["runtime-stdout.log", "runtime-stderr.log"] {
+    for log in ["runtime-stdout.log", "runtime-stderr.log", "runtime-resume-stdout.log", "runtime-resume-stderr.log"] {
         if let Ok(bytes) = fs::read(workdir.join(log)) {
             write_bounded(&out.join(log), &bytes)?;
         }

@@ -63,7 +63,7 @@ fn conforming_fixture_passes_every_scenario() {
     let r = conforming(&[]);
     assert_eq!(r.code, 0, "{}", r.stdout);
     let scenarios = r.report["scenarios"].as_array().unwrap();
-    assert_eq!(scenarios.len(), 10);
+    assert_eq!(scenarios.len(), 12);
     for s in scenarios {
         assert_eq!(s["verdict"], "PASS", "{}: {}", s["id"], s);
     }
@@ -72,7 +72,7 @@ fn conforming_fixture_passes_every_scenario() {
     assert_eq!(r.report["runtime"]["version"], "0.1.0");
     assert_eq!(r.report["exit"]["code"], 0);
     assert_eq!(r.report["command"]["argv"][1], "fixtures/conforming-agent/agent.py");
-    assert!(r.stdout.contains("Summary: 10 passed, 0 failed, 0 unknown"));
+    assert!(r.stdout.contains("Summary: 12 passed, 0 failed, 0 unknown"));
 
     // Correlation IDs survived the round trip and hashes match on both sides.
     let call = &scenario(&r, "exact-text")["calls"][0];
@@ -87,6 +87,8 @@ fn conforming_fixture_passes_every_scenario() {
         .map(|q| q["response_status"].as_i64().unwrap())
         .collect();
     assert_eq!(statuses, vec![200, 429, 200]);
+    assert_eq!(scenario(&r, "persistence-resume")["process"]["restarts"], 1);
+    assert_eq!(scenario(&r, "persistence-resume")["provider_requests"][2]["role"], "replay after resume");
 }
 
 #[test]
@@ -118,6 +120,8 @@ fn faulty_fixture_faults_are_detected() {
         ("json-float", "structured-json", "StructuralMutation"),
         ("echo-user", "concurrent-two-tools", "DuplicateResult"),
         ("json-dup-key", "structured-json", "StructuralMutation"),
+        ("replay-mutation", "replay-history", "ReplayMutation"),
+        ("replay-mutation", "persistence-resume", "ReplayMutation"),
     ];
     let handles: Vec<_> = cases
         .iter()
@@ -211,6 +215,21 @@ fn harness_and_configuration_errors_exit_2() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
+
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("no-replay.json");
+    let mut adapter: Value =
+        serde_json::from_str(&std::fs::read_to_string(root().join("adapters/fixture-agent.json")).unwrap()).unwrap();
+    adapter.as_object_mut().unwrap().remove("capabilities");
+    adapter.as_object_mut().unwrap().remove("resume");
+    std::fs::write(&manifest, serde_json::to_vec(&adapter).unwrap()).unwrap();
+    let out = Command::new(BIN)
+        .current_dir(root())
+        .args(["run", "--adapter", manifest.to_str().unwrap(), "--scenario", "persistence-resume", "--", "true"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("requires adapter capability `persistence-resume`"));
 }
 
 #[test]

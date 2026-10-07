@@ -72,6 +72,9 @@ class Hooks:
     def retry_messages(self, messages, attempt):
         return messages
 
+    def replay_messages(self, messages, resumed):
+        return messages
+
     def after_tool_calls(self):
         pass
 
@@ -101,26 +104,45 @@ def write_runtime_info(name):
             json.dump({"name": name, "version": "0.1.0", "python": sys.version.split()[0]}, f)
 
 
+def save_state(path, messages, tools):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"messages": messages, "tools": tools}, f, ensure_ascii=False, separators=(",", ":"))
+
+
+def load_state(path):
+    with open(path) as f:
+        state = json.load(f)
+    return state["messages"], state["tools"]
+
+
 def run(name, hooks=None, reorder=False):
     hooks = hooks or Hooks()
     write_runtime_info(name)
     base_url = os.environ["OPENAI_BASE_URL"]
     api_key = os.environ.get("OPENAI_API_KEY", "")
-    mcp = McpClient(os.environ["BOUNDARYCHECK_MCP_COMMAND"], json.loads(os.environ["BOUNDARYCHECK_MCP_ARGS"]))
+    resumed = os.environ.get("BOUNDARYCHECK_RESUME") == "1"
+    state_path = os.environ.get("BOUNDARYCHECK_STATE_PATH", "")
+    mcp = None
     try:
-        mcp.initialize()
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": t["name"],
-                    "description": t.get("description", ""),
-                    "parameters": t["inputSchema"],
-                },
-            }
-            for t in mcp.request("tools/list")["tools"]
-        ]
-        messages = [{"role": "user", "content": os.environ["BOUNDARYCHECK_PROMPT"]}]
+        if resumed:
+            messages, tools = load_state(state_path)
+            messages = hooks.replay_messages(messages, True)
+        else:
+            mcp = McpClient(os.environ["BOUNDARYCHECK_MCP_COMMAND"], json.loads(os.environ["BOUNDARYCHECK_MCP_ARGS"]))
+            mcp.initialize()
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t["name"],
+                        "description": t.get("description", ""),
+                        "parameters": t["inputSchema"],
+                    },
+                }
+                for t in mcp.request("tools/list")["tools"]
+            ]
+            messages = [{"role": "user", "content": os.environ["BOUNDARYCHECK_PROMPT"]}]
         for _turn in range(8):
             body_messages = messages
             for attempt in range(1, 5):
@@ -137,7 +159,14 @@ def run(name, hooks=None, reorder=False):
             message = reply["choices"][0]["message"]
             calls = message.get("tool_calls") or []
             if not calls:
-                print(message.get("content"))
+                content = message.get("content")
+                if content == "BOUNDARYCHECK_REPLAY_REQUIRED":
+                    messages = hooks.replay_messages(messages, False)
+                    continue
+                if content == "BOUNDARYCHECK_CHECKPOINT_AND_EXIT":
+                    save_state(state_path, messages, tools)
+                    return 0
+                print(content)
                 return 0
             messages.append({"role": "assistant", "content": message.get("content"), "tool_calls": calls})
             hooks.after_tool_calls()
@@ -154,4 +183,5 @@ def run(name, hooks=None, reorder=False):
         print("too many turns", file=sys.stderr)
         return 1
     finally:
-        mcp.close()
+        if mcp is not None:
+            mcp.close()
