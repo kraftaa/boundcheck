@@ -18,6 +18,9 @@ pub struct Adapter {
     #[serde(default)]
     pub description: String,
     pub provider_protocol: String,
+    /// Optional lifecycle features implemented by this runtime adapter.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     /// Environment variables set for the runtime (values are templates).
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
@@ -36,6 +39,9 @@ pub struct Adapter {
     /// Text written to the runtime's stdin (template); stdin is closed otherwise.
     #[serde(default)]
     pub stdin: Option<String>,
+    /// Optional second launch used by persistence/resume scenarios.
+    #[serde(default)]
+    pub resume: Option<Resume>,
     #[serde(default)]
     pub readiness: Readiness,
     #[serde(default)]
@@ -104,6 +110,20 @@ fn inherited(parent: &[(String, String)], mode: InheritEnvironment, passthrough:
 pub struct AdapterFile {
     pub path: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Resume {
+    /// Environment overrides applied to the second runtime process.
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+    /// Arguments appended only to the second runtime process.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Optional stdin for the second process; defaults to the adapter's stdin.
+    #[serde(default)]
+    pub stdin: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -213,12 +233,25 @@ pub fn parse(text: &str, source: &str) -> Result<Adapter, String> {
             a.name, a.provider_protocol
         ));
     }
+    for capability in &a.capabilities {
+        if !["history-replay", "persistence-resume"].contains(&capability.as_str()) {
+            return Err(format!("adapter {} declares unknown capability `{capability}`", a.name));
+        }
+    }
+    if a.capabilities.iter().any(|c| c == "persistence-resume") && a.resume.is_none() {
+        return Err(format!("adapter {} declares `persistence-resume` but has no `resume` configuration", a.name));
+    }
     // Dry-run every template so configuration errors surface before any process starts.
     let vars = TemplateVars::placeholder();
     let mut templates: Vec<&String> = a.environment.values().chain(a.args.iter()).collect();
     templates.extend(a.files.iter().map(|f| &f.content));
     templates.extend(a.files.iter().map(|f| &f.path));
     templates.extend(a.stdin.iter());
+    if let Some(resume) = &a.resume {
+        templates.extend(resume.environment.values());
+        templates.extend(resume.args.iter());
+        templates.extend(resume.stdin.iter());
+    }
     if let RuntimeVersion::Command { argv } = &a.runtime_version {
         if argv.is_empty() {
             return Err(format!("adapter {}: runtime_version.argv is empty", a.name));

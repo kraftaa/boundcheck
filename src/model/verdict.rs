@@ -36,8 +36,6 @@ pub enum FailureClass {
     /// an error-status change is not observable with the V1 protocol.
     #[allow(dead_code)]
     ErrorStatusMutation,
-    /// Reserved for replay scenarios (not implemented in V1).
-    #[allow(dead_code)]
     ReplayMutation,
     ContentMutation,
 }

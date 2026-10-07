@@ -44,12 +44,22 @@ fn run(args: RunArgs) -> i32 {
         Ok(a) => a,
         Err(e) => return config_error(&e),
     };
+    let supports = |s: &&scenario::ScenarioDef| match s.required_capability() {
+        None => true,
+        Some(c) => adapter.capabilities.iter().any(|a| a == c),
+    };
     let scenarios = if args.scenarios.is_empty() {
-        scenario::all().iter().collect()
+        scenario::all().iter().filter(supports).collect()
     } else {
         let mut v = vec![];
         for name in &args.scenarios {
             match scenario::find(name) {
+                Some(s) if s.required_capability().is_some_and(|c| !adapter.capabilities.iter().any(|a| a == c)) => {
+                    return config_error(&format!(
+                        "scenario `{name}` requires adapter capability `{}`",
+                        s.required_capability().unwrap()
+                    ));
+                }
                 Some(s) if !v.iter().any(|x: &&scenario::ScenarioDef| x.id == s.id) => v.push(s),
                 Some(_) => {}
                 None => {

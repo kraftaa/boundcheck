@@ -11,6 +11,7 @@ Faults (all injected on purpose; none of them is a real framework defect):
   duplicate         send every tool message twice
   missing           drop the last tool message of each turn
   retry-mutation    alter results only when re-sending after HTTP 429
+  replay-mutation   alter persisted/replayed results after the first delivery
   normalize         apply Unicode NFC normalization to results
   json-float        re-encode JSON integers as floats (precision loss)
   reserialize-json  pretty-print JSON results (legal: semantics unchanged)
@@ -129,6 +130,15 @@ class FaultyHooks(bc_agent.Hooks):
                 m["content"] = m["content"] + " [retried]"
         return mutated
 
+    def replay_messages(self, messages, resumed):
+        if "replay-mutation" not in self.faults:
+            return messages
+        mutated = [dict(m) for m in messages]
+        for m in mutated:
+            if m["role"] == "tool":
+                m["content"] = m["content"] + " [replayed]"
+        return mutated
+
     def after_tool_calls(self):
         if "escape" in self.faults:
             child = subprocess.Popen(["sleep", "300"], start_new_session=True)
@@ -155,7 +165,7 @@ def main(argv):
         elif arg == "--pid-file":
             pid_file = next(it)
     known = set(CONTENT_FAULTS) | {
-        "swap", "missing", "duplicate", "retry-mutation", "exit-early", "hang", "echo-user", "extra-id", "escape",
+        "swap", "missing", "duplicate", "retry-mutation", "replay-mutation", "exit-early", "hang", "echo-user", "extra-id", "escape",
     }
     unknown = faults - known
     if unknown or not faults:

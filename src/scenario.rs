@@ -18,6 +18,13 @@ pub enum Tier {
     PostMvp,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayMode {
+    None,
+    SameProcess,
+    Resume,
+}
+
 #[derive(Debug)]
 pub struct ScenarioDef {
     pub id: &'static str,
@@ -30,6 +37,9 @@ pub struct ScenarioDef {
     /// Answer the first request that carries tool results with a deterministic
     /// HTTP 429, then expect the runtime to retry.
     pub rate_limit_first_result: bool,
+    /// Ask the runtime to submit the completed tool-result history again,
+    /// either in the same process or after a checkpoint/restart.
+    pub replay: ReplayMode,
 }
 
 pub const CALL_1: &str = "BC_CALL_000001";
@@ -37,6 +47,8 @@ pub const CALL_2: &str = "BC_CALL_000002";
 
 pub const TOOL_NAME: &str = "boundary_test";
 pub const FINAL_TEXT: &str = "BOUNDARYCHECK_SCENARIO_COMPLETE";
+pub const REPLAY_TEXT: &str = "BOUNDARYCHECK_REPLAY_REQUIRED";
+pub const CHECKPOINT_TEXT: &str = "BOUNDARYCHECK_CHECKPOINT_AND_EXIT";
 
 static SCENARIOS: &[ScenarioDef] = &[
     ScenarioDef {
@@ -46,6 +58,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         tier: Tier::Mvp,
         turns: &[&[CALL_1]],
         rate_limit_first_result: false,
+        replay: ReplayMode::None,
     },
     ScenarioDef {
         id: "large-text-1k",
@@ -54,6 +67,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         tier: Tier::Mvp,
         turns: &[&[CALL_1]],
         rate_limit_first_result: false,
+        replay: ReplayMode::None,
     },
     ScenarioDef {
         id: "large-text-50k",
@@ -62,6 +76,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         tier: Tier::Mvp,
         turns: &[&[CALL_1]],
         rate_limit_first_result: false,
+        replay: ReplayMode::None,
     },
     ScenarioDef {
         id: "large-text-100k",
@@ -70,6 +85,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         tier: Tier::Mvp,
         turns: &[&[CALL_1]],
         rate_limit_first_result: false,
+        replay: ReplayMode::None,
     },
     ScenarioDef {
         id: "concurrent-two-tools",
@@ -78,6 +94,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         tier: Tier::Mvp,
         turns: &[&[CALL_1, CALL_2]],
         rate_limit_first_result: false,
+        replay: ReplayMode::None,
     },
     ScenarioDef {
         id: "sequential-history",
@@ -86,6 +103,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         tier: Tier::PostMvp,
         turns: &[&[CALL_1], &[CALL_2]],
         rate_limit_first_result: false,
+        replay: ReplayMode::None,
     },
     ScenarioDef {
         id: "structured-json",
@@ -94,6 +112,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         tier: Tier::PostMvp,
         turns: &[&[CALL_1]],
         rate_limit_first_result: false,
+        replay: ReplayMode::None,
     },
     ScenarioDef {
         id: "retry-429",
@@ -102,6 +121,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         tier: Tier::PostMvp,
         turns: &[&[CALL_1]],
         rate_limit_first_result: true,
+        replay: ReplayMode::None,
     },
     ScenarioDef {
         id: "mcp-error",
@@ -110,6 +130,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         tier: Tier::PostMvp,
         turns: &[&[CALL_1]],
         rate_limit_first_result: false,
+        replay: ReplayMode::None,
     },
     ScenarioDef {
         id: "unicode-boundaries",
@@ -118,6 +139,25 @@ static SCENARIOS: &[ScenarioDef] = &[
         tier: Tier::PostMvp,
         turns: &[&[CALL_1]],
         rate_limit_first_result: false,
+        replay: ReplayMode::None,
+    },
+    ScenarioDef {
+        id: "replay-history",
+        summary: "the completed tool-result history must remain unchanged when replayed",
+        kind: ContentKind::Text,
+        tier: Tier::PostMvp,
+        turns: &[&[CALL_1]],
+        rate_limit_first_result: false,
+        replay: ReplayMode::SameProcess,
+    },
+    ScenarioDef {
+        id: "persistence-resume",
+        summary: "persisted tool-result history must survive a process restart unchanged",
+        kind: ContentKind::Text,
+        tier: Tier::PostMvp,
+        turns: &[&[CALL_1]],
+        rate_limit_first_result: false,
+        replay: ReplayMode::Resume,
     },
 ];
 
@@ -130,6 +170,14 @@ pub fn find(id: &str) -> Option<&'static ScenarioDef> {
 }
 
 impl ScenarioDef {
+    pub fn required_capability(&self) -> Option<&'static str> {
+        match self.replay {
+            ReplayMode::None => None,
+            ReplayMode::SameProcess => Some("history-replay"),
+            ReplayMode::Resume => Some("persistence-resume"),
+        }
+    }
+
     pub fn call_ids(&self) -> Vec<&'static str> {
         self.turns.iter().flat_map(|t| t.iter().copied()).collect()
     }

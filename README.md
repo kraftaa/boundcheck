@@ -68,11 +68,11 @@ boundarycheck list-adapters
 | `--artifacts <path>` | Save evidence for FAIL and UNKNOWN scenarios under `<path>/<run_id>/`. This also keeps the work directory. |
 | `--artifacts-all` | With `--artifacts`, also save evidence for passing scenarios. |
 | `--timeout <seconds>` | Per-scenario timeout, including startup. Default 60. |
-| `--scenario <name>` | Run only this scenario. Repeatable. By default every scenario runs. |
+| `--scenario <name>` | Run only this scenario. Repeatable. By default every scenario supported by the selected adapter runs. |
 | `--keep-workdir` | Keep the temporary work directory and print its path. |
 | `--save-headers` | Save provider request headers with the artifacts. Credentials are always redacted. |
 
-boundarycheck runs the agent command directly, without a shell. Ports are allocated dynamically on `127.0.0.1` and are never exposed as flags. Each scenario starts a fresh runtime process.
+boundarycheck runs the agent command directly, without a shell. Ports are allocated dynamically on `127.0.0.1` and are never exposed as flags. Each scenario starts a fresh runtime process; `persistence-resume` deliberately starts a second process from persisted state.
 
 ### Exit codes
 
@@ -112,6 +112,8 @@ Any other path gets HTTP 404 and makes the scenario UNKNOWN. A request for a dif
 - Tool calls use the deterministic call IDs below. Their `arguments` are `{"run_id":…,"scenario":…,"call_id":…}`.
 - The final answer has the content `BOUNDARYCHECK_SCENARIO_COMPLETE`.
 
+Replay-capable adapters also understand two deterministic control responses. `BOUNDARYCHECK_REPLAY_REQUIRED` asks for the completed history again in the same process. `BOUNDARYCHECK_CHECKPOINT_AND_EXIT` asks the runtime to persist that history and exit; the harness then launches the adapter's `resume` process.
+
 **Retry scenario.** The first tool-result request gets HTTP 429 with `retry-after-ms: 50` and `retry-after: 1` headers and an `error.type` of `rate_limit_error`.
 
 **Error status.** Chat Completions tool messages have no error flag. An MCP `isError: true` result can therefore only be checked by its content. The report shows `error_status: "not-representable"`.
@@ -138,6 +140,8 @@ Any other path gets HTTP 404 and makes the scenario UNKNOWN. A request for a dif
 | `retry-429` | The result request gets HTTP 429 once. The retried request must carry the same result. |
 | `mcp-error` | An `isError: true` result. Its content must arrive unchanged. |
 | `unicode-boundaries` | NFC/NFD pairs, stacked and leading combining marks, ZWJ emoji, flags, VS16, RTL, Devanagari, Hangul jamo, astral characters, a BOM, ZWNJ, fullwidth characters and ligatures. Byte-exact. |
+| `replay-history` | The completed tool-result history is submitted a second time by the same process and must remain unchanged. Requires adapter capability `history-replay`. |
+| `persistence-resume` | The runtime persists its completed history, exits, and a new process reloads and submits it. Requires adapter capability `persistence-resume`. |
 
 The identifiers are deterministic:
 
@@ -152,6 +156,7 @@ Each scenario is a finite state machine on the provider side:
 ```text
 WAIT_INITIAL_REQUEST --(tools offered)--> send tool call(s)
 WAIT_TOOL_RESULT(turn) --(result request)--> [429 once for retry-429] --> next turn | final answer
+WAIT_TOOL_RESULT --(replay scenario)--> WAIT_REPLAYED_HISTORY | WAIT_RESUMED_HISTORY
 COMPLETE
 anything unexpected --> ABORTED  (the scenario becomes UNKNOWN, never a guessed FAIL)
 ```
@@ -193,7 +198,8 @@ Classes are derived from structural facts only: the common prefix and suffix, ex
 | `StructuralMutation` | JSON scenario: the canonical values differ (the first path is reported), or an object key appears twice, whose meaning depends on the parser. |
 | `RetryMutation` | The retried request differs from the MCP result, although attempt 1 matched it. |
 | `ContentMutation` | Any other proven difference: Unicode normalization (NFC/NFD/NFKC/NFKD), inserted text, or replaced text. |
-| `ErrorStatusMutation`, `ReplayMutation` | Reserved. These are not observable with the V1 protocol and scenarios. |
+| `ReplayMutation` | A result that arrived intact originally is missing, duplicated, reassociated or changed in replayed or restored history. |
+| `ErrorStatusMutation` | Reserved because Chat Completions cannot represent the MCP error flag. |
 
 The human output reports the most specific proven fact. All findings are in the JSON report.
 
@@ -224,13 +230,20 @@ An adapter is a JSON manifest that tells the harness how to configure, start, dr
   "name": "example-python-agent",
   "description": "free text",
   "provider_protocol": "openai-chat-completions",
+  "capabilities": ["history-replay", "persistence-resume"],
   "environment": {
     "OPENAI_BASE_URL": "{{provider_base_url}}",
     "OPENAI_API_KEY": "boundarycheck-test-key",
     "BOUNDARYCHECK_MCP_COMMAND": "{{mcp_command}}",
     "BOUNDARYCHECK_MCP_ARGS": "{{mcp_args_json}}",
     "BOUNDARYCHECK_PROMPT": "{{scenario_prompt}}",
-    "BOUNDARYCHECK_RUNTIME_INFO": "{{runtime_info_path}}"
+    "BOUNDARYCHECK_RUNTIME_INFO": "{{runtime_info_path}}",
+    "BOUNDARYCHECK_STATE_PATH": "{{workdir}}/runtime-state.json"
+  },
+  "resume": {
+    "environment": { "BOUNDARYCHECK_RESUME": "1" },
+    "args": [],
+    "stdin": null
   },
   "args": [],
   "files": [{ "path": "mcp.json", "content": "{\"command\": {{mcp_command_json}}, \"args\": {{mcp_args_json}}}" }],
@@ -253,6 +266,7 @@ An adapter is a JSON manifest that tells the harness how to configure, start, dr
 | 7. Completion | `provider-scenario-complete`: done when the final answer is sent; the runtime then has `exit_grace_seconds` to exit. `process-exit`: also waits for the runtime to exit with code 0. |
 | 8. Termination | SIGTERM to the runtime's process group, then SIGKILL after `shutdown.grace_seconds`. Stray group members, such as a leaked MCP server, are killed too. |
 | 9. Runtime version | `static` (`value`), `command` (`argv`, whose stdout is the version), `report-file` (the runtime writes `{"name","version",...}` to `{{runtime_info_path}}`), or `unknown`. |
+| 10. Replay/resume | Declare `history-replay` and/or `persistence-resume` in `capabilities`. The latter also requires a `resume` block whose environment, args and optional stdin are applied to the second process. |
 
 **Templates.**
 
@@ -293,7 +307,7 @@ No framework defect was found. Every FAIL in this repository's demo and tests co
 - `fixtures/conforming-agent/agent.py` forwards results unchanged. With `--reorder`, it reverses concurrent results; this is legal and must still PASS.
 - `fixtures/faulty-agent/agent.py --fault NAME[,NAME…]` injects deliberate faults:
   - `truncate`, `head-tail`, `head-tail-marker`, `utf8-split`
-  - `swap`, `duplicate`, `missing`, `retry-mutation`
+  - `swap`, `duplicate`, `missing`, `retry-mutation`, `replay-mutation`
   - `normalize`, `json-float`
   - `json-dup-key` (hides a different value in an earlier duplicate key)
   - `escape` (starts a `setsid()` child, then hangs)
@@ -315,7 +329,7 @@ The JSON report (`--report`) contains:
   - verdict, classifications, findings (proven differences with byte offsets, retained head and tail lengths, inserted-text excerpt, missing sentinels, JSON path), and unknown reasons
   - for each call: tool bytes and hash (content and transport), and each provider occurrence with request, attempt, occurrence count, message indexes, bytes, hash, and the three comparison levels
   - every provider request: sequence number, offsets and timestamps, role, status, size and hash
-  - final state-machine state, process exit status, and timing
+  - final state-machine state, process exits/restart count, and timing
 - **Totals:** `summary` and `exit` (`code` and `classification`).
 
 Artifacts (`--artifacts DIR`) are opt-in:
@@ -342,7 +356,7 @@ DIR/BC_RUN_000001/
 ## Testing
 
 ```bash
-cargo test     # 34 unit tests + 14 end-to-end tests (requires python3)
+cargo test     # 35 unit tests + 14 end-to-end tests (requires python3)
 ```
 
 The unit tests cover:
@@ -357,6 +371,7 @@ The unit tests cover:
 - template rendering
 - verdict-to-exit-code mapping
 - process-group termination
+- same-process replay and process-restart resume
 
 The suite passes on macOS 26.7 (arm64) and on Linux (Debian bookworm in Docker, Python 3.11). `.github/workflows/ci.yml` runs formatting, clippy and the tests on both.
 
@@ -374,6 +389,7 @@ The integration tests launch the real binary, the provider, the MCP server and t
 - a hidden duplicate JSON key
 - a `setsid()` child that leaves the process group
 - Ctrl-C: children killed, work directory removed, exit code 2
+- persisted replay after a real process restart, including deliberate replay-only mutation
 - artifact layout, permissions and redaction
 
 ## Known limitations
@@ -383,7 +399,7 @@ The integration tests launch the real binary, the provider, the MCP server and t
 - Only text tool results are covered: no image or resource content.
 - Error status is not observable with Chat Completions, so only error content is checked.
 - The runtime is assumed not to be adversarial. It runs as the same OS user and launches the MCP server itself, so no file, socket or secret can be kept out of its reach. boundarycheck cross-checks the evidence log against its payload generator, which catches corrupted or edited evidence; it cannot stop a runtime written to fool the test. Testing hostile code needs OS-level isolation (a separate user or sandbox), which is outside this tool.
-- Persistence/resume and replay scenarios are not implemented yet. The `ReplayMutation` class is reserved for them.
+- Replay and persistence/resume require explicit adapter capabilities because runtimes expose different lifecycle APIs. Unsupported lifecycle scenarios are omitted by default and rejected if selected explicitly.
 - One runtime process is started per scenario. Runtimes with expensive startup make a run slower.
 - On macOS, a process that leaves the runtime's process group *and* is orphaned because its parent already exited is reparented to launchd and cannot be found. While its parent is alive it is found and killed, as it always is on Linux, where boundarycheck is a child subreaper. Output capture never waits more than 2 seconds for such a process.
 - Tool discovery accepts `boundary_test` or a single `<sep>boundary_test` suffix. Runtimes that rename tools in any other way are reported as `adapter-insufficient`.

@@ -278,6 +278,7 @@ pub fn evaluate(machine: &ScenarioMachine, mcp: &[McpEvidence], runner_unknowns:
             RequestRole::Result { turn, attempt } => (Some(turn), Some(attempt)),
             _ => (None, None),
         };
+        let replayed = matches!(req.role, RequestRole::Replay { .. });
         let tool_msgs: Vec<&ParsedMessage> = parsed.messages.iter().filter(|m| m.role == "tool").collect();
         let echoed = parsed.messages.iter().any(|m| m.tool_call_ids.iter().any(|id| req.issued_before.contains(id)));
         if tool_msgs.is_empty() && !echoed {
@@ -418,6 +419,12 @@ pub fn evaluate(machine: &ScenarioMachine, mcp: &[McpEvidence], runner_unknowns:
                         );
                         f.class = FailureClass::RetryMutation;
                     }
+                }
+            }
+            if replayed {
+                for f in &mut call_findings {
+                    f.summary = format!("replayed history changed a previously delivered result: {}", f.summary);
+                    f.class = FailureClass::ReplayMutation;
                 }
             }
             findings.extend(call_findings);
