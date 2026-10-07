@@ -163,6 +163,7 @@ fn run_scenario(
     let dir = workdir.join(def.id);
     mkdir_private(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let evidence = dir.join("mcp-evidence.jsonl");
+    write_private(&evidence, b"").map_err(|e| format!("cannot create MCP evidence file: {e}"))?;
     let runtime_info = dir.join("runtime-info.json");
     let (stdout_path, stderr_path) = (dir.join("runtime-stdout.log"), dir.join("runtime-stderr.log"));
     let provider = Provider::start(run_id, def, cfg.save_headers)?;

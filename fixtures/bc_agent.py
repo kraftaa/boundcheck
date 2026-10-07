@@ -22,20 +22,29 @@ class McpClient:
         self.next_id = 0
 
     def request(self, method, params=None):
-        self.next_id += 1
-        msg = {"jsonrpc": "2.0", "id": self.next_id, "method": method}
-        if params is not None:
-            msg["params"] = params
-        self._send(msg)
-        while True:
+        return self.request_many([(None, method, params)])[0][1]
+
+    def request_many(self, requests):
+        pending = {}
+        for key, method, params in requests:
+            self.next_id += 1
+            msg = {"jsonrpc": "2.0", "id": self.next_id, "method": method}
+            if params is not None:
+                msg["params"] = params
+            pending[self.next_id] = key
+            self._send(msg)
+        completed = []
+        while pending:
             line = self.proc.stdout.readline()
             if not line:
                 raise RuntimeError("MCP server closed stdout")
             reply = json.loads(line)
-            if reply.get("id") == self.next_id:
+            reply_id = reply.get("id")
+            if reply_id in pending:
                 if "error" in reply:
                     raise RuntimeError(f"MCP error: {reply['error']}")
-                return reply["result"]
+                completed.append((pending.pop(reply_id), reply["result"]))
+        return completed
 
     def notify(self, method):
         self._send({"jsonrpc": "2.0", "method": method})
@@ -170,12 +179,16 @@ def run(name, hooks=None, reorder=False):
                 return 0
             messages.append({"role": "assistant", "content": message.get("content"), "tool_calls": calls})
             hooks.after_tool_calls()
-            results = []
-            for call in calls:
-                result = mcp.request(
+            pending_calls = [
+                (
+                    call,
                     "tools/call",
                     {"name": call["function"]["name"], "arguments": json.loads(call["function"]["arguments"])},
                 )
+                for call in calls
+            ]
+            results = []
+            for call, result in mcp.request_many(pending_calls):
                 results.append({"role": "tool", "tool_call_id": call["id"], "content": tool_result_text(result)})
             if reorder:
                 results.reverse()

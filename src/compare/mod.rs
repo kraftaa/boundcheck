@@ -201,6 +201,20 @@ pub fn evaluate(machine: &ScenarioMachine, mcp: &[McpEvidence], runner_unknowns:
                 .push(format!("MCP response seq {} (pid {}) carried no call_id or no text content", rec.seq, rec.pid)),
         }
     }
+    for turn in def.turns.iter().filter(|turn| turn.len() > 1) {
+        let completion_order: Vec<&str> = mcp
+            .iter()
+            .filter(|r| r.event == "tool-response")
+            .filter_map(|r| r.call_id.as_deref())
+            .filter(|id| turn.contains(id))
+            .collect();
+        if completion_order.len() == turn.len() && completion_order != *turn {
+            notes.push(format!(
+                "MCP calls completed in order {completion_order:?}, different from issue order {:?}",
+                turn
+            ));
+        }
+    }
     if sessions == 0 && !machine.issued.is_empty() {
         unknowns.push(UnknownNote::new(
             UnknownReason::AdapterInsufficient,

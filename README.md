@@ -134,7 +134,7 @@ Replay-capable adapters also understand two deterministic control responses. `BO
 |---|---|
 | `exact-text` | A small UTF-8 text with characters that need JSON escaping (`"`, `\`, tab, U+0001, U+2028) arrives byte-identical. |
 | `large-text-1k` / `-50k` / `-100k` | 1,024 / 51,200 / 102,400 bytes of mixed 1–4 byte UTF-8. Sentinels `[[BC_SENTINEL:NNN:<call>]]` start at exactly 0%, 25%, 50% and 75%, and the last one ends at 100%. |
-| `concurrent-two-tools` | Two calls in one turn: `BC_CALL_000001` → `city=Boston`, `BC_CALL_000002` → `city=Chicago`. Results are associated by ID, in any order. |
+| `concurrent-two-tools` | Two calls are put in flight together: `BC_CALL_000001` → `city=Boston`, `BC_CALL_000002` → `city=Chicago`. Call A is delayed so B completes first; results must remain associated by ID. |
 | `sequential-history` | Two calls in consecutive turns. Every later request must still contain each earlier result exactly once and unchanged. |
 | `structured-json` | Nested JSON with `9007199254740993`, `12345678901234567890`, `19.990`, `1e-7`, `-0.0`, unicode keys and deep nesting. Compared semantically. |
 | `retry-429` | The result request gets HTTP 429 once. The retried request must carry the same result. |
@@ -284,7 +284,7 @@ An adapter is a JSON manifest that tells the harness how to configure, start, dr
 Built-in adapters:
 
 - `fixture-agent`: the stdlib-only Python fixtures in `fixtures/`.
-- `openai-agents-python`: the OpenAI Agents SDK through `adapters/openai-agents-python/agent.py`. This shim only wires `OpenAIChatCompletionsModel` and `MCPServerStdio` to the fake endpoints. The SDK handles tool results itself. Pass `--stream` to the shim to use `Runner.run_streamed`.
+- `openai-agents-python`: the OpenAI Agents SDK through `adapters/openai-agents-python/agent.py`. This shim only wires `OpenAIChatCompletionsModel`, `MCPServerStdio`, and the SDK's native [`SQLiteSession`](https://openai.github.io/openai-agents-python/sessions/) to the fake boundaries. The SDK handles tool results and persisted history itself. Pass `--stream` to the shim to use `Runner.run_streamed`.
 
 ## Real runtime result
 
@@ -293,12 +293,14 @@ Built-in adapters:
 | Runtime | `openai-agents` **0.23.1**, with `openai` 3.26.0 and `mcp` 2.3.0 (pinned in `adapters/openai-agents-python/requirements.txt`) |
 | Python | 3.13.5 |
 | OS | macOS 26.7 (Darwin 25.6.0, arm64) |
-| Result | 10/10 PASS, both non-streaming and streaming (`--stream`) |
+| Result | 12/12 PASS, both non-streaming and streaming (`--stream`) |
 
 Observed behavior:
 
 - The SDK sends MCP text results as a one-element array of text parts. The transport representation is `changed`, and the extracted text bytes are `identical`.
 - The SDK retried the HTTP 429 with the identical result.
+- Two MCP calls were simultaneously in flight and completed B then A without losing their call-ID association.
+- `SQLiteSession` preserved the tool result through both same-process replay and a real process exit/restart.
 
 No framework defect was found. Every FAIL in this repository's demo and tests comes from the faulty fixture, whose faults are deliberately injected.
 
@@ -351,12 +353,13 @@ DIR/BC_RUN_000001/
 - The parent environment is never copied into reports.
 - Raw artifacts are capped at 8 MiB per file, and runtime stdout and stderr at 1 MiB per stream.
 - Files, including the `--report` file, are created `0600`, and directories `0700`.
+- Evidence and report files are opened with `O_NOFOLLOW`; symlink targets are refused.
 - Request bodies outside the active run are discarded.
 
 ## Testing
 
 ```bash
-cargo test     # 35 unit tests + 14 end-to-end tests (requires python3)
+cargo test     # 37 unit tests + 14 end-to-end tests (requires python3)
 ```
 
 The unit tests cover:
@@ -372,6 +375,8 @@ The unit tests cover:
 - verdict-to-exit-code mapping
 - process-group termination
 - same-process replay and process-restart resume
+- concurrent MCP completion in reverse order
+- evidence-file symlink refusal
 
 The suite passes on macOS 26.7 (arm64) and on Linux (Debian bookworm in Docker, Python 3.11). `.github/workflows/ci.yml` runs formatting, clippy and the tests on both.
 
@@ -390,6 +395,7 @@ The integration tests launch the real binary, the provider, the MCP server and t
 - a `setsid()` child that leaves the process group
 - Ctrl-C: children killed, work directory removed, exit code 2
 - persisted replay after a real process restart, including deliberate replay-only mutation
+- report-file symlink refusal
 - artifact layout, permissions and redaction
 
 ## Known limitations

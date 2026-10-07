@@ -16,7 +16,7 @@ import os
 import platform
 import sys
 
-from agents import Agent, OpenAIChatCompletionsModel, Runner, set_tracing_disabled
+from agents import Agent, OpenAIChatCompletionsModel, Runner, SQLiteSession, set_tracing_disabled
 from agents.mcp import MCPServerStdio
 from openai import AsyncOpenAI
 
@@ -36,6 +36,15 @@ def write_runtime_info():
         json.dump(info, f)
 
 
+async def run_once(agent, prompt, session, streamed):
+    if streamed:
+        result = Runner.run_streamed(agent, prompt, max_turns=10, session=session)
+        async for _event in result.stream_events():
+            pass
+        return result
+    return await Runner.run(agent, prompt, max_turns=10, session=session)
+
+
 async def main():
     write_runtime_info()
     set_tracing_disabled(True)
@@ -52,12 +61,24 @@ async def main():
             model=OpenAIChatCompletionsModel(model="boundarycheck-model", openai_client=client),
         )
         prompt = os.environ["BOUNDARYCHECK_PROMPT"]
-        if "--stream" in sys.argv[1:]:
-            result = Runner.run_streamed(agent, prompt, max_turns=10)
-            async for _event in result.stream_events():
-                pass
-        else:
-            result = await Runner.run(agent, prompt, max_turns=10)
+        scenario = os.environ["BOUNDARYCHECK_SCENARIO_ID"]
+        lifecycle = scenario in {"replay-history", "persistence-resume"}
+        session = (
+            SQLiteSession(os.environ["BOUNDARYCHECK_SESSION_ID"], os.environ["BOUNDARYCHECK_SESSION_DB"])
+            if lifecycle
+            else None
+        )
+        resumed = os.environ.get("BOUNDARYCHECK_RESUME") == "1"
+        if resumed:
+            prompt = "Continue from the persisted boundarycheck history without calling the tool again."
+        result = await run_once(agent, prompt, session, "--stream" in sys.argv[1:])
+        if result.final_output == "BOUNDARYCHECK_REPLAY_REQUIRED":
+            result = await run_once(
+                agent,
+                "Replay the existing history without calling the tool again.",
+                session,
+                "--stream" in sys.argv[1:],
+            )
         print(result.final_output)
 
 

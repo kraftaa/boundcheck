@@ -29,8 +29,12 @@ PASS mcp-error
 
 PASS unicode-boundaries
 
+PASS replay-history
+
+PASS persistence-resume
+
 runtime: openai-agents 0.23.1 (version source: runtime-report-file)
-Summary: 10 passed, 0 failed, 0 unknown
+Summary: 12 passed, 0 failed, 0 unknown
 [exit status 0]
 
 $ boundarycheck run --adapter fixture-agent --scenario exact-text --scenario large-text-100k --scenario concurrent-two-tools -- python3 fixtures/faulty-agent/agent.py --fault head-tail,swap

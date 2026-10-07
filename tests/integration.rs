@@ -95,6 +95,9 @@ fn conforming_fixture_passes_every_scenario() {
 fn legal_reordering_of_concurrent_results_passes() {
     let r = conforming(&["--scenario", "concurrent-two-tools"]);
     assert_eq!(r.code, 0);
+    let notes = scenario(&r, "concurrent-two-tools")["notes"].as_array().unwrap();
+    assert!(notes.iter().any(|n| n.as_str().unwrap().contains("MCP calls completed in order")));
+    assert!(notes.iter().any(|n| n.as_str().unwrap().contains("legal reordering")));
     let r2 = boundarycheck(
         &["--scenario", "concurrent-two-tools"],
         &["python3", "fixtures/conforming-agent/agent.py", "--reorder"],
@@ -102,7 +105,6 @@ fn legal_reordering_of_concurrent_results_passes() {
     assert_eq!(r2.code, 0, "{}", r2.stdout);
     let s = scenario(&r2, "concurrent-two-tools");
     assert_eq!(s["verdict"], "PASS");
-    assert!(s["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("legal reordering")));
 }
 
 #[test]
@@ -230,6 +232,32 @@ fn harness_and_configuration_errors_exit_2() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("requires adapter capability `persistence-resume`"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let target = dir.path().join("report-target");
+        std::fs::write(&target, b"private").unwrap();
+        let link = dir.path().join("report-link");
+        symlink(&target, &link).unwrap();
+        let out = Command::new(BIN)
+            .current_dir(root())
+            .args([
+                "run",
+                "--adapter",
+                "fixture-agent",
+                "--scenario",
+                "exact-text",
+                "--report",
+                link.to_str().unwrap(),
+                "--",
+                "/nonexistent/agent-binary",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(std::fs::read(&target).unwrap(), b"private");
+    }
 }
 
 #[test]
