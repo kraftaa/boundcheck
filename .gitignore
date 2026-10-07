@@ -1,0 +1,13 @@
+/target
+/.boundarycheck
+/.venv*
+__pycache__/
+*.pyc
+/boundarycheck-report.json
+/docs/review.md
+.DS_Store
+.env
+.env.*
+!.env.example
+*.pem
+*.key

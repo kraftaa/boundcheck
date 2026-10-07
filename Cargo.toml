@@ -1,0 +1,29 @@
+[package]
+name = "boundarycheck"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic harness that verifies tool results survive the MCP -> runtime -> model-provider boundary"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+
+[[bin]]
+name = "boundarycheck"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
+humantime = "2"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order", "raw_value"] }
+sha2 = "0.10"
+tempfile = "3"
+tiny_http = "0.12"
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+
+[profile.release]
+debug = false

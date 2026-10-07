@@ -1,0 +1,4 @@
+# Pinned runtime under test for the boundarycheck real-runtime demonstration.
+openai-agents==0.23.1
+openai==3.26.0
+mcp==2.3.0
