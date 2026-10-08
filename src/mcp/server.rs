@@ -27,7 +27,7 @@ pub struct McpServer {
 }
 
 pub fn serve(run_id: String, scenario: String, evidence: PathBuf) -> i32 {
-    let server = McpServer { run_id, scenario, evidence, seq: Arc::new(AtomicU64::new(0)) };
+    let server = McpServer::new(run_id, scenario, evidence);
     match server.run(io::stdin().lock(), io::stdout()) {
         Ok(()) => 0,
         Err(e) => {
@@ -38,7 +38,12 @@ pub fn serve(run_id: String, scenario: String, evidence: PathBuf) -> i32 {
 }
 
 impl McpServer {
-    fn run(&self, input: impl BufRead, mut output: impl Write + Send) -> io::Result<()> {
+    pub fn new(run_id: String, scenario: String, evidence: PathBuf) -> Self {
+        McpServer { run_id, scenario, evidence, seq: Arc::new(AtomicU64::new(0)) }
+    }
+
+    /// Serve newline-delimited JSON-RPC from `input` until EOF.
+    pub fn run(&self, input: impl BufRead, mut output: impl Write + Send) -> io::Result<()> {
         let seq = self.next_seq();
         self.record(McpEvidence {
             event: "session-start".into(),

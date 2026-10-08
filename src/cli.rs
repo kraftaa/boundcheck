@@ -50,8 +50,12 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 60.0)]
     pub timeout: f64,
     /// Run only this scenario (repeatable). Default: all scenarios.
+    /// Accepts `large-text:<bytes>` (optionally `k`/`m`, 1k..8m) for any payload size.
     #[arg(long = "scenario", value_name = "NAME")]
     pub scenarios: Vec<String>,
+    /// Also run the extended sizes: 65,535/65,536/65,537, 250 KiB, 1 MiB-1/1 MiB/1 MiB+1, 5 MiB.
+    #[arg(long, conflicts_with = "scenarios")]
+    pub extended: bool,
     /// Preserve the temporary work directory.
     #[arg(long)]
     pub keep_workdir: bool,

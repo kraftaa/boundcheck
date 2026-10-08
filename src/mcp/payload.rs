@@ -60,6 +60,9 @@ pub fn generate(run_id: &str, scenario_id: &str, call_id: &str) -> Option<Payloa
         "large-text-1k" => text(large_text(&head, call_id, 1024)),
         "large-text-50k" => text(large_text(&head, call_id, 50 * 1024)),
         "large-text-100k" => text(large_text(&head, call_id, 100 * 1024)),
+        id if scenario::large_text_size(id).is_some() => {
+            text(large_text(&head, call_id, scenario::large_text_size(id).unwrap()))
+        }
         "concurrent-two-tools" => {
             let city = if call_id == CALL_1 { "Boston" } else { "Chicago" };
             text(format!("{head}|city={city}"))
@@ -169,6 +172,27 @@ fn fill(out: &mut String, target: usize, call_id: &str, line: &mut u32) {
 mod tests {
     use super::*;
     use crate::scenario::CALL_2;
+
+    #[test]
+    fn parameterized_large_text() {
+        assert_eq!(scenario::large_text_size("large-text:65537"), Some(65_537));
+        assert_eq!(scenario::large_text_size("large-text:64k"), Some(65_536));
+        assert_eq!(scenario::large_text_size("large-text:5M"), Some(5 * 1024 * 1024));
+        for bad in
+            ["large-text:", "large-text:1023", "large-text:9m", "large-text:-5", "large-text:1.5k", "large-text:k"]
+        {
+            assert_eq!(scenario::large_text_size(bad), None, "{bad}");
+        }
+        let def = scenario::find("large-text:1m").unwrap();
+        assert_eq!(def.id, "large-text:1048576");
+        assert!(std::ptr::eq(def, scenario::find("large-text:1048576").unwrap()), "defs are cached");
+        for n in [1024, 65_535, 65_537, 1_048_577] {
+            let p = generate("BC_RUN_000001", &scenario::large_text_id(n), CALL_1).unwrap();
+            assert_eq!(p.text.len(), n);
+            assert_eq!(sentinel_count(CALL_1, p.text.as_bytes()), 5);
+            assert_eq!(find(p.text.as_bytes(), sentinel(CALL_1, 50).as_bytes()), Some(n / 2));
+        }
+    }
 
     #[test]
     fn large_text_sizes_and_sentinels() {

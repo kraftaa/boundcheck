@@ -24,6 +24,10 @@ use std::collections::{BTreeMap, HashMap};
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
     pub class: FailureClass,
+    /// For `RetryMutation` / `ReplayMutation`: the proven fault underneath
+    /// (e.g. `MissingResult`, `WrongToolCallAssociation`, `Truncation`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underlying_class: Option<FailureClass>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,9 +50,17 @@ pub struct Finding {
 }
 
 impl Finding {
+    /// Re-label a finding as a retry/replay mutation, keeping the original
+    /// class (the first one, if it was already re-labelled) as the cause.
+    fn relabel(&mut self, class: FailureClass) {
+        self.underlying_class.get_or_insert(self.class);
+        self.class = class;
+    }
+
     fn new(class: FailureClass, call_id: &str, seq: u64, attempt: Option<u32>, summary: String) -> Self {
         Finding {
             class,
+            underlying_class: None,
             call_id: Some(call_id.to_owned()),
             request_seq: Some(seq),
             attempt,
@@ -111,6 +123,7 @@ pub struct CallReport {
 pub struct Evaluation {
     pub verdict: Verdict,
     pub classifications: Vec<FailureClass>,
+    pub underlying_classifications: Vec<FailureClass>,
     pub findings: Vec<Finding>,
     pub unknowns: Vec<UnknownNote>,
     pub notes: Vec<String>,
@@ -431,14 +444,14 @@ pub fn evaluate(machine: &ScenarioMachine, mcp: &[McpEvidence], runner_unknowns:
                             "retry attempt {a} changed a result that attempt 1 delivered intact: {}",
                             f.summary
                         );
-                        f.class = FailureClass::RetryMutation;
+                        f.relabel(FailureClass::RetryMutation);
                     }
                 }
             }
             if replayed {
                 for f in &mut call_findings {
                     f.summary = format!("replayed history changed a previously delivered result: {}", f.summary);
-                    f.class = FailureClass::ReplayMutation;
+                    f.relabel(FailureClass::ReplayMutation);
                 }
             }
             findings.extend(call_findings);
@@ -507,6 +520,10 @@ pub fn evaluate(machine: &ScenarioMachine, mcp: &[McpEvidence], runner_unknowns:
     let mut classifications: Vec<FailureClass> = findings.iter().map(|f| f.class).collect();
     classifications.sort();
     classifications.dedup();
+    let mut underlying_classifications: Vec<FailureClass> =
+        findings.iter().filter_map(|f| f.underlying_class).collect();
+    underlying_classifications.sort();
+    underlying_classifications.dedup();
     let calls = def
         .call_ids()
         .into_iter()
@@ -519,6 +536,7 @@ pub fn evaluate(machine: &ScenarioMachine, mcp: &[McpEvidence], runner_unknowns:
     Evaluation {
         verdict: decide(!findings.is_empty(), !unknowns.is_empty()),
         classifications,
+        underlying_classifications,
         findings,
         unknowns,
         notes,

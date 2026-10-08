@@ -1,13 +1,4 @@
-mod adapter;
-mod cli;
-mod compare;
-mod mcp;
-mod model;
-mod process;
-mod provider;
-mod report;
-mod runner;
-mod scenario;
+use boundarycheck::{adapter, cli, mcp, model, process, provider, report, runner, scenario};
 
 use clap::Parser;
 use cli::{Cli, Cmd, RunArgs};
@@ -18,10 +9,11 @@ fn main() {
     let code = match cli.command {
         Cmd::McpServer { run_id, scenario, evidence } => mcp::server::serve(run_id, scenario, evidence),
         Cmd::ListScenarios => {
-            for s in scenario::all() {
+            for s in scenario::all().iter().chain(scenario::extended()) {
                 let tier = match s.tier {
                     scenario::Tier::Mvp => "mvp",
                     scenario::Tier::PostMvp => "post-mvp",
+                    scenario::Tier::Extended => "extended",
                 };
                 println!("{:<22} {:<9} {}", s.id, tier, s.summary);
             }
@@ -49,7 +41,11 @@ fn run(args: RunArgs) -> i32 {
         Some(c) => adapter.capabilities.iter().any(|a| a == c),
     };
     let scenarios = if args.scenarios.is_empty() {
-        scenario::all().iter().filter(supports).collect()
+        let mut v: Vec<&'static scenario::ScenarioDef> = scenario::all().iter().filter(supports).collect();
+        if args.extended {
+            v.extend(scenario::extended());
+        }
+        v
     } else {
         let mut v = vec![];
         for name in &args.scenarios {
@@ -64,7 +60,12 @@ fn run(args: RunArgs) -> i32 {
                 Some(_) => {}
                 None => {
                     let known: Vec<&str> = scenario::all().iter().map(|s| s.id).collect();
-                    return config_error(&format!("unknown scenario `{name}` (known: {})", known.join(", ")));
+                    return config_error(&format!(
+                        "unknown scenario `{name}` (known: {}, or large-text:<bytes> with {}..={} bytes, k/m suffix allowed)",
+                        known.join(", "),
+                        scenario::LARGE_TEXT_MIN,
+                        scenario::LARGE_TEXT_MAX
+                    ));
                 }
             }
         }

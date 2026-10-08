@@ -80,6 +80,9 @@ pub struct ScenarioReport {
     pub summary: String,
     pub verdict: Verdict,
     pub classifications: Vec<FailureClass>,
+    /// Causes underneath RetryMutation / ReplayMutation findings.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub underlying_classifications: Vec<FailureClass>,
     pub started_at: String,
     pub duration_ms: u128,
     pub findings: Vec<Finding>,
@@ -213,7 +216,8 @@ fn render_failure(out: &mut String, s: &ScenarioReport) {
         (Some(d), None) => format!(" — {}", d.label),
         _ => String::new(),
     };
-    let _ = writeln!(out, "  classification:     {}{label}", head.class.name());
+    let cause = head.underlying_class.map(|c| format!(" (underlying: {})", c.name())).unwrap_or_default();
+    let _ = writeln!(out, "  classification:     {}{cause}{label}", head.class.name());
     let mut seen = vec![(head.class, head.call_id.clone())];
     for f in &s.findings {
         let key = (f.class, f.call_id.clone());

@@ -6,6 +6,9 @@ description = "Deterministic harness that verifies tool results survive the MCP 
 license = "MIT OR Apache-2.0"
 rust-version = "1.80"
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "boundarycheck"
 path = "src/main.rs"
@@ -24,6 +27,7 @@ tiny_http = "0.12"
 unicode-normalization = "0.1"
 
 [dev-dependencies]
+proptest = "1"
 
 [profile.release]
 debug = false
