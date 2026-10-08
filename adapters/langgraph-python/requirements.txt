@@ -1,0 +1,5 @@
+# Pinned runtime under test (LangGraph + LangChain MCP adapters). Full set: requirements.lock.
+langgraph==1.2.14
+langchain-openai==1.7.0
+langchain-mcp-adapters==0.3.2
+langchain-core==1.6.8

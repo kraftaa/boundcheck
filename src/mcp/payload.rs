@@ -2,13 +2,39 @@
 //! (run_id, scenario_id, call_id): no clocks, no randomness.
 
 use crate::scenario::{self, CALL_1};
-use serde_json::Value;
+use serde_json::{json, Value};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Payload {
+    /// The logical text: all text blocks concatenated in order.
     pub text: String,
     pub structured: Option<Value>,
     pub is_error: bool,
+    /// The full MCP `content` array; `None` means one text block holding `text`.
+    pub content: Option<Vec<Value>>,
+    /// MCP `_meta` on the result.
+    pub meta: Option<Value>,
+    /// A JSON-RPC error `(code, message)` returned instead of a result.
+    pub protocol_error: Option<(i64, String)>,
+}
+
+impl Payload {
+    /// The MCP `content` array as sent on the wire.
+    pub fn content_items(&self) -> Vec<Value> {
+        self.content.clone().unwrap_or_else(|| vec![json!({"type": "text", "text": self.text})])
+    }
+}
+
+/// A valid 1x1 PNG, used as the deterministic image payload.
+pub const PNG_1X1_BASE64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+/// The first bytes of a WAV header; only compared, never played.
+pub const AUDIO_BASE64: &str = "UklGRiQAAABXQVZFZm10IBAAAAA=";
+
+/// Build a payload from content blocks; `text` is derived from the text blocks.
+fn blocks(items: Vec<Value>) -> Payload {
+    let text = items.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect();
+    Payload { text, content: Some(items), ..Payload::default() }
 }
 
 /// Positional sentinels embedded in large-text payloads.
@@ -52,7 +78,7 @@ pub fn generate(run_id: &str, scenario_id: &str, call_id: &str) -> Option<Payloa
         return None;
     }
     let head = format!("{run_id}|{scenario_id}|{call_id}");
-    let text = |text: String| Some(Payload { text, structured: None, is_error: false });
+    let text = |text: String| Some(Payload { text, ..Payload::default() });
     match scenario_id {
         "exact-text" => {
             text(format!("{head}|exact text: \"quoted\" back\\slash\ttab\u{1}ctl\u{2028}ls caf\u{e9} \u{2713}\n"))
@@ -72,6 +98,15 @@ pub fn generate(run_id: &str, scenario_id: &str, call_id: &str) -> Option<Payloa
             text(format!("{head}|step={step}|history must keep this result exactly once"))
         }
         "retry-429" => text(format!("{head}|retry payload: unchanged across HTTP retries \u{2713}")),
+        "retry-500"
+        | "retry-503"
+        | "retry-repeated"
+        | "disconnect-after-request"
+        | "connection-reset"
+        | "truncated-response"
+        | "slow-response" => {
+            text(format!("{head}|transport-fault payload: must survive the failure unchanged \u{2713}"))
+        }
         "replay-history" => text(format!("{head}|replay payload: unchanged across history replay \u{2713}")),
         "persistence-resume" => {
             text(format!("{head}|persisted payload: unchanged across process restart and resume \u{2713}"))
@@ -79,17 +114,70 @@ pub fn generate(run_id: &str, scenario_id: &str, call_id: &str) -> Option<Payloa
         "unicode-boundaries" => text(format!("{head}|{}", unicode_text())),
         "mcp-error" => Some(Payload {
             text: format!("{head}|error: deterministic tool failure (code BC_E_042)"),
-            structured: None,
             is_error: true,
+            ..Payload::default()
         }),
         "structured-json" => {
             let value = structured_json(run_id, scenario_id, call_id);
             Some(Payload {
                 text: serde_json::to_string(&value).expect("serialize"),
                 structured: Some(value),
-                is_error: false,
+                ..Payload::default()
             })
         }
+        "multi-text-blocks" => Some(blocks(vec![
+            json!({"type": "text", "text": format!("{head}|block 1 of 3\n")}),
+            json!({"type": "text", "text": "block 2 of 3: caf\u{e9} \u{2192} \u{1f600}"}),
+            json!({"type": "text", "text": "block 3 of 3 \"quoted\""}),
+        ])),
+        "structured-content" => Some(Payload {
+            text: format!("{head}|found 2 orders for customer C-17"),
+            structured: Some(json!({
+                "run_id": run_id, "scenario": scenario_id, "call_id": call_id,
+                "customer": "C-17",
+                "orders": [{"id": 9007199254740993u64, "total": "19.990"}, {"id": 2, "total": "0.10"}]
+            })),
+            ..Payload::default()
+        }),
+        "error-with-metadata" => Some(Payload {
+            text: format!("{head}|error: quota exceeded for project P-9 (code BC_E_429)"),
+            is_error: true,
+            structured: Some(json!({"error": {"code": "BC_E_429", "retry_after_s": 30, "call_id": call_id}})),
+            meta: Some(json!({"boundarycheck/trace": format!("{run_id}/{call_id}")})),
+            ..Payload::default()
+        }),
+        "mcp-protocol-error" => Some(Payload {
+            text: format!("{head}|protocol error: deterministic invalid-params failure (code BC_E_32602)"),
+            protocol_error: Some((
+                -32602,
+                format!("{head}|protocol error: deterministic invalid-params failure (code BC_E_32602)"),
+            )),
+            ..Payload::default()
+        }),
+        "mixed-content" => Some(blocks(vec![
+            json!({"type": "text", "text": format!("{head}|before the image")}),
+            json!({"type": "image", "data": PNG_1X1_BASE64, "mimeType": "image/png"}),
+            json!({"type": "text", "text": "after the image"}),
+        ])),
+        "embedded-resource" => Some(blocks(vec![
+            json!({"type": "text", "text": format!("{head}|two embedded resources follow")}),
+            json!({"type": "resource", "resource": {
+                "uri": format!("bc://{run_id}/{call_id}/notes.txt"), "mimeType": "text/plain",
+                "text": "embedded text resource body"
+            }}),
+            json!({"type": "resource", "resource": {
+                "uri": format!("bc://{run_id}/{call_id}/pixel.png"), "mimeType": "image/png", "blob": PNG_1X1_BASE64
+            }}),
+        ])),
+        "resource-link" => Some(blocks(vec![
+            json!({"type": "text", "text": format!("{head}|see the linked report")}),
+            json!({"type": "resource_link", "uri": format!("bc://{run_id}/{call_id}/report.csv"),
+                   "name": "report.csv", "mimeType": "text/csv"}),
+        ])),
+        "audio-content" => Some(blocks(vec![
+            json!({"type": "text", "text": format!("{head}|audio follows")}),
+            json!({"type": "audio", "data": AUDIO_BASE64, "mimeType": "audio/wav"}),
+        ])),
         _ => None,
     }
 }

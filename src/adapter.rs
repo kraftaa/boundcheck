@@ -1,7 +1,7 @@
 //! Runtime adapter manifests: how to configure, start, drive and stop a
 //! runtime. Nothing in here is visible to the comparison engine.
 
-use crate::provider::protocol::PROTOCOL;
+use crate::provider::protocol::Protocol;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -9,6 +9,12 @@ use std::path::Path;
 const BUILTIN: &[(&str, &str)] = &[
     ("fixture-agent", include_str!("../adapters/fixture-agent.json")),
     ("openai-agents-python", include_str!("../adapters/openai-agents-python.json")),
+    ("fixture-agent-responses", include_str!("../adapters/fixture-agent-responses.json")),
+    ("openai-agents-python-responses", include_str!("../adapters/openai-agents-python-responses.json")),
+    ("pydantic-ai-python", include_str!("../adapters/pydantic-ai-python.json")),
+    ("pydantic-ai-python-responses", include_str!("../adapters/pydantic-ai-python-responses.json")),
+    ("langgraph-python", include_str!("../adapters/langgraph-python.json")),
+    ("langgraph-python-responses", include_str!("../adapters/langgraph-python-responses.json")),
 ];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,6 +75,11 @@ const MINIMAL_ENV: &[&str] =
     &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ", "TERM"];
 
 impl Adapter {
+    /// The provider protocol this adapter's runtime speaks (validated in `parse`).
+    pub fn protocol(&self) -> Protocol {
+        Protocol::from_name(&self.provider_protocol).unwrap_or(Protocol::ChatCompletions)
+    }
+
     /// The runtime's complete environment: inherited variables per policy,
     /// loopback proxy bypass, then the adapter's own (rendered) variables.
     pub fn child_environment(&self, rendered: &[(String, String)]) -> Vec<(String, String)> {
@@ -227,10 +238,13 @@ pub fn load(spec: &str) -> Result<Adapter, String> {
 pub fn parse(text: &str, source: &str) -> Result<Adapter, String> {
     let mut a: Adapter = serde_json::from_str(text).map_err(|e| format!("invalid adapter manifest {source}: {e}"))?;
     a.source = source.to_owned();
-    if a.provider_protocol != PROTOCOL {
+    if Protocol::from_name(&a.provider_protocol).is_none() {
+        let known: Vec<&str> = Protocol::ALL.iter().map(|p| p.name()).collect();
         return Err(format!(
-            "adapter {} uses provider protocol `{}`; boundarycheck V1 supports only `{PROTOCOL}`",
-            a.name, a.provider_protocol
+            "adapter {} uses provider protocol `{}`; boundarycheck supports only {}",
+            a.name,
+            a.provider_protocol,
+            known.join(", ")
         ));
     }
     for capability in &a.capabilities {
@@ -359,6 +373,7 @@ impl TemplateVars {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::protocol::PROTOCOL;
 
     #[test]
     fn builtins_parse() {
@@ -424,7 +439,8 @@ mod tests {
         let m = |proto: &str, env: &str| {
             format!(r#"{{"name":"x","provider_protocol":"{proto}","environment":{{"A":"{env}"}}}}"#)
         };
-        assert!(parse(&m("openai-responses", "x"), "t").unwrap_err().contains("supports only"));
+        assert!(parse(&m("unsupported-messages", "x"), "t").unwrap_err().contains("supports only"));
+        assert!(parse(&m("openai-responses", "x"), "t").is_ok());
         assert!(parse(&m(PROTOCOL, "{{bogus}}"), "t").is_err());
         assert!(parse(&m(PROTOCOL, "{{provider_base_url}}"), "t").is_ok());
     }

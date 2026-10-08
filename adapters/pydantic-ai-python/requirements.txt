@@ -1,0 +1,2 @@
+# Pinned runtime under test (Pydantic AI). Full set: requirements.lock.
+pydantic-ai-slim[openai,mcp]==2.54.0

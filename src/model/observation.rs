@@ -39,6 +39,12 @@ pub struct ToolObservation {
     pub content_sha256: String,
     pub json: Option<Value>,
     pub is_error: bool,
+    /// Ordered MCP content blocks (empty for a JSON-RPC error).
+    pub blocks: Vec<crate::model::content::Block>,
+    /// MCP `structuredContent`, if present.
+    pub structured: Option<Value>,
+    /// JSON-RPC error message, when the server answered with an error instead of a result.
+    pub protocol_error: Option<String>,
     pub arguments: Option<Value>,
     pub generated: bool,
 }
@@ -50,6 +56,8 @@ pub struct ProviderObservation {
     pub raw_content_token: Option<String>,
     pub extracted_content: Vec<u8>,
     pub content_sha256: String,
-    /// 0 for string content, else the number of text parts concatenated.
+    /// 0 for string content, else the number of content parts.
     pub content_parts: usize,
+    /// Image parts in order: SHA-256 of the decoded inline data (`None` for a remote URL).
+    pub images: Vec<Option<String>>,
 }

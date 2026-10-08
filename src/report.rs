@@ -29,6 +29,9 @@ pub struct RunReport {
     pub workdir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub harness_error: Option<String>,
+    /// Set when the run happened inside `--isolation docker`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<String>,
     pub exit: ExitSummary,
 }
 
@@ -154,8 +157,16 @@ pub fn render_scenario(s: &ScenarioReport) -> String {
     let _ = writeln!(out, "{} {}", s.verdict.label(), s.id);
     match s.verdict {
         Verdict::Pass => {
-            for n in s.notes.iter().filter(|n| n.contains("JSON semantics identical") || n.contains("legal reordering"))
-            {
+            let shown = [
+                "JSON semantics identical",
+                "legal reordering",
+                "text blocks joined",
+                "error message delivered",
+                "JSON array of strings",
+                "inside runtime wording",
+                "followed by runtime wording",
+            ];
+            for n in s.notes.iter().filter(|n| shown.iter().any(|k| n.contains(k))) {
                 let _ = writeln!(out, "  note: {n}");
             }
         }

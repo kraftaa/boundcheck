@@ -166,16 +166,23 @@ impl McpServer {
                 "boundarycheck: arguments do not match the active run (expected run_id={} scenario={})",
                 self.run_id, self.scenario
             ),
-            structured: None,
             is_error: true,
+            ..payload::Payload::default()
         });
-        let mut result = serde_json::Map::new();
-        result.insert("content".into(), json!([{"type": "text", "text": payload.text}]));
-        if let Some(s) = payload.structured {
-            result.insert("structuredContent".into(), s);
-        }
-        result.insert("isError".into(), Value::Bool(payload.is_error));
-        let bytes = encode(&json!({"jsonrpc": "2.0", "id": id, "result": Value::Object(result)}));
+        let bytes = if let Some((code, message)) = &payload.protocol_error {
+            error_response(id.clone(), *code, message)
+        } else {
+            let mut result = serde_json::Map::new();
+            result.insert("content".into(), Value::Array(payload.content_items()));
+            if let Some(s) = payload.structured {
+                result.insert("structuredContent".into(), s);
+            }
+            result.insert("isError".into(), Value::Bool(payload.is_error));
+            if let Some(m) = payload.meta {
+                result.insert("_meta".into(), m);
+            }
+            encode(&json!({"jsonrpc": "2.0", "id": id, "result": Value::Object(result)}))
+        };
         let seq = self.next_seq();
         self.record(McpEvidence {
             event: "tool-response".into(),

@@ -8,10 +8,12 @@
 //! ```
 
 use crate::model::verdict::{UnknownNote, UnknownReason};
-use crate::provider::protocol::{self, ParsedRequest, PlannedCall};
+use crate::provider::protocol::{self, ParsedRequest, PlannedCall, Protocol};
 use crate::provider::recorder::{RequestRecord, RequestRole};
-use crate::scenario::{self, ReplayMode, ScenarioDef, CHECKPOINT_TEXT, FINAL_TEXT, REPLAY_TEXT, TOOL_NAME};
+use crate::provider::responses;
+use crate::scenario::{self, Fault, ReplayMode, ScenarioDef, CHECKPOINT_TEXT, FINAL_TEXT, REPLAY_TEXT, TOOL_NAME};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,11 +48,33 @@ pub struct Reply {
     pub content_type: &'static str,
     pub headers: Vec<(&'static str, String)>,
     pub body: Vec<u8>,
+    /// How the HTTP layer delivers the reply (transport-fault scenarios).
+    pub delivery: Delivery,
+}
+
+/// Transport-level behavior for one reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    Normal,
+    /// Close the connection without sending anything.
+    Close,
+    /// Reset the TCP connection without sending anything.
+    Reset,
+    /// Send the headers (with the full Content-Length) and half the body, then close.
+    Truncate,
+    /// Send normally after a delay.
+    Delay(std::time::Duration),
 }
 
 impl Reply {
     fn json(status: u16, v: &Value) -> Reply {
-        Reply { status, content_type: "application/json", headers: vec![], body: serde_json::to_vec(v).unwrap() }
+        Reply {
+            status,
+            content_type: "application/json",
+            headers: vec![],
+            body: serde_json::to_vec(v).unwrap(),
+            delivery: Delivery::Normal,
+        }
     }
 }
 
@@ -63,15 +87,30 @@ pub struct ScenarioMachine {
     pub requests: Vec<RequestRecord>,
     pub unknowns: Vec<UnknownNote>,
     pub rejected_paths: Vec<String>,
-    rate_limited: bool,
+    pub protocol: Protocol,
+    /// Responses API: the conversation of every response sent, by response id,
+    /// so that a later `previous_response_id` can be resolved.
+    response_store: HashMap<String, Vec<Value>>,
+    /// Responses API: output items of the reply being built.
+    last_output: Vec<Value>,
+    /// Fault replies already sent for this scenario.
+    faults_sent: u32,
     attempts: u32,
     started: Instant,
     seq: u64,
 }
 
 impl ScenarioMachine {
+    /// A machine speaking OpenAI Chat Completions.
     pub fn new(run_id: &str, def: &'static ScenarioDef) -> Self {
+        Self::with_protocol(run_id, def, Protocol::ChatCompletions)
+    }
+
+    pub fn with_protocol(run_id: &str, def: &'static ScenarioDef, protocol: Protocol) -> Self {
         ScenarioMachine {
+            protocol,
+            response_store: HashMap::new(),
+            last_output: vec![],
             run_id: run_id.to_owned(),
             def,
             phase: Phase::AwaitInitial,
@@ -80,7 +119,7 @@ impl ScenarioMachine {
             requests: vec![],
             unknowns: vec![],
             rejected_paths: vec![],
-            rate_limited: false,
+            faults_sent: 0,
             attempts: 0,
             started: Instant::now(),
             seq: 0,
@@ -172,7 +211,7 @@ impl ScenarioMachine {
                 rec.response_kind = "models";
                 Reply::json(200, &protocol::models_body())
             }
-            ("POST", "/chat/completions") => self.chat(rec),
+            ("POST", endpoint) if endpoint == self.protocol.endpoint() => self.model_request(rec),
             _ => {
                 rec.role = RequestRole::Rejected;
                 rec.response_kind = "rejected-unsupported-endpoint";
@@ -180,8 +219,12 @@ impl ScenarioMachine {
                 self.unknown(
                     UnknownReason::UnsupportedRequestShape,
                     format!(
-                        "request #{} to unsupported endpoint {} {} (only POST {base}/chat/completions is implemented)",
-                        rec.seq, rec.method, rec.path
+                        "request #{} to unsupported endpoint {} {} (the adapter's protocol {} uses POST {base}{})",
+                        rec.seq,
+                        rec.method,
+                        rec.path,
+                        self.protocol.name(),
+                        self.protocol.endpoint()
                     ),
                 );
                 Reply::json(404, &protocol::error_body("unsupported endpoint", "invalid_request_error"))
@@ -189,7 +232,7 @@ impl ScenarioMachine {
         }
     }
 
-    fn chat(&mut self, rec: &mut RequestRecord) -> Reply {
+    fn model_request(&mut self, rec: &mut RequestRecord) -> Reply {
         if rec.raw_truncated {
             rec.response_kind = "body-too-large";
             self.unknown(
@@ -199,7 +242,12 @@ impl ScenarioMachine {
             self.phase = Phase::Aborted;
             return Reply::json(413, &protocol::error_body("body too large", "invalid_request_error"));
         }
-        let parsed = match protocol::parse_request(&rec.raw) {
+        let parsed = match self.protocol {
+            Protocol::ChatCompletions => protocol::parse_request(&rec.raw).map(|p| (p, vec![])),
+            Protocol::Responses => responses::parse_request(&rec.raw, |id| self.response_store.get(id).cloned())
+                .map(|r| (r.parsed, r.items)),
+        };
+        let (parsed, items) = match parsed {
             Ok(p) => p,
             Err(e) => {
                 rec.response_kind = "unparseable";
@@ -209,7 +257,16 @@ impl ScenarioMachine {
                 return Reply::json(400, &protocol::error_body(&e, "invalid_request_error"));
             }
         };
+        self.last_output.clear();
         let reply = self.transition(rec, &parsed);
+        if self.protocol == Protocol::Responses
+            && reply.status == 200
+            && matches!(reply.delivery, Delivery::Normal | Delivery::Delay(_))
+        {
+            let mut conversation = items;
+            conversation.append(&mut self.last_output);
+            self.response_store.insert(responses::response_id(rec.seq), conversation);
+        }
         rec.parsed = Some(parsed);
         reply
     }
@@ -243,25 +300,18 @@ impl ScenarioMachine {
             Phase::AwaitResults { turn } => {
                 self.attempts += 1;
                 rec.role = RequestRole::Result { turn, attempt: self.attempts };
-                if self.def.rate_limit_first_result && !self.rate_limited {
-                    self.rate_limited = true;
-                    rec.response_kind = "rate-limit-429";
-                    let mut r = Reply::json(429, &protocol::rate_limit_body());
-                    r.headers.push(("retry-after-ms", "50".into()));
-                    r.headers.push(("retry-after", "1".into()));
-                    return r;
+                if self.faults_sent < self.def.fault.failures() {
+                    self.faults_sent += 1;
+                    return self.fault_reply(rec, req);
                 }
-                if turn + 1 < self.def.turns.len() {
-                    self.issue_turn(rec, req, turn + 1)
-                } else if self.def.replay != ReplayMode::None {
-                    let resumed = self.def.replay == ReplayMode::Resume;
-                    self.phase = Phase::AwaitReplay { resumed };
-                    let marker = if resumed { CHECKPOINT_TEXT } else { REPLAY_TEXT };
-                    self.marker_answer(rec, req, marker)
-                } else {
-                    self.phase = Phase::Complete;
-                    self.final_answer(rec, req)
+                let mut reply = self.answer_results(rec, req, turn);
+                if let Fault::Delay { ms } = self.def.fault {
+                    if self.attempts == 1 {
+                        rec.response_kind = "delayed";
+                        reply.delivery = Delivery::Delay(std::time::Duration::from_millis(ms));
+                    }
                 }
+                reply
             }
             Phase::AwaitReplay { resumed } => {
                 rec.role = RequestRole::Replay { resumed };
@@ -278,6 +328,81 @@ impl ScenarioMachine {
                 }
                 self.final_answer(rec, req)
             }
+        }
+    }
+
+    /// The deterministic failure for this scenario. The phase does not
+    /// advance, so the runtime's retry is handled as the next attempt.
+    fn fault_reply(&mut self, rec: &mut RequestRecord, req: &ParsedRequest) -> Reply {
+        match self.def.fault {
+            Fault::Status { code, .. } => {
+                rec.response_kind = match code {
+                    429 => "fault-http-429",
+                    500 => "fault-http-500",
+                    503 => "fault-http-503",
+                    _ => "fault-http-status",
+                };
+                let body = if code == 429 {
+                    protocol::rate_limit_body()
+                } else {
+                    protocol::error_body("boundarycheck deterministic server error (retry expected)", "server_error")
+                };
+                let mut r = Reply::json(code, &body);
+                r.headers.push(("retry-after-ms", "50".into()));
+                r.headers.push(("retry-after", "1".into()));
+                r
+            }
+            Fault::Disconnect => {
+                rec.response_kind = "fault-disconnect";
+                Reply { delivery: Delivery::Close, ..Reply::json(200, &Value::Null) }
+            }
+            Fault::Reset => {
+                rec.response_kind = "fault-reset";
+                Reply { delivery: Delivery::Reset, ..Reply::json(200, &Value::Null) }
+            }
+            Fault::Truncate => {
+                // A well-formed final answer, cut off halfway by the HTTP layer.
+                let model = req.model.as_deref().unwrap_or("boundarycheck-model");
+                let mut r = match (self.protocol, req.stream) {
+                    (Protocol::ChatCompletions, true) => {
+                        sse(protocol::final_stream(rec.seq, model, FINAL_TEXT, req.include_usage))
+                    }
+                    (Protocol::ChatCompletions, false) => {
+                        Reply::json(200, &protocol::final_response(rec.seq, model, FINAL_TEXT))
+                    }
+                    (Protocol::Responses, true) => {
+                        sse(responses::stream(rec.seq, model, &responses::message_items(rec.seq, FINAL_TEXT)))
+                    }
+                    (Protocol::Responses, false) => Reply::json(
+                        200,
+                        &responses::response(
+                            rec.seq,
+                            model,
+                            &responses::message_items(rec.seq, FINAL_TEXT),
+                            "completed",
+                        ),
+                    ),
+                };
+                rec.response_kind = "fault-truncated";
+                r.delivery = Delivery::Truncate;
+                r
+            }
+            Fault::None | Fault::Delay { .. } => unreachable!("not a failing fault"),
+        }
+    }
+
+    /// The normal answer to a result request: the next turn, a replay marker, or the final answer.
+    fn answer_results(&mut self, rec: &mut RequestRecord, req: &ParsedRequest, turn: usize) -> Reply {
+        if turn + 1 < self.def.turns.len() {
+            self.issue_turn(rec, req, turn + 1)
+        } else if self.def.replay != ReplayMode::None {
+            let resumed = self.def.replay == ReplayMode::Resume;
+            self.phase = Phase::AwaitReplay { resumed };
+            let marker = if resumed { CHECKPOINT_TEXT } else { REPLAY_TEXT };
+            self.marker_answer(rec, req, marker)
+        } else {
+            self.phase = Phase::Complete;
+            self.final_answer(rec, req)
         }
     }
 
@@ -301,10 +426,17 @@ impl ScenarioMachine {
         self.attempts = 0;
         rec.response_kind = "tool-calls";
         let model = req.model.as_deref().unwrap_or("boundarycheck-model");
-        if req.stream {
-            sse(protocol::tool_calls_stream(rec.seq, model, &calls, req.include_usage))
-        } else {
-            Reply::json(200, &protocol::tool_calls_response(rec.seq, model, &calls))
+        match (self.protocol, req.stream) {
+            (Protocol::ChatCompletions, true) => {
+                sse(protocol::tool_calls_stream(rec.seq, model, &calls, req.include_usage))
+            }
+            (Protocol::ChatCompletions, false) => {
+                Reply::json(200, &protocol::tool_calls_response(rec.seq, model, &calls))
+            }
+            (Protocol::Responses, stream) => {
+                self.last_output = responses::tool_call_items(rec.seq, &calls);
+                self.responses_reply(rec.seq, model, stream)
+            }
         }
     }
 
@@ -315,10 +447,21 @@ impl ScenarioMachine {
     fn marker_answer(&mut self, rec: &mut RequestRecord, req: &ParsedRequest, text: &str) -> Reply {
         rec.response_kind = "final-answer";
         let model = req.model.as_deref().unwrap_or("boundarycheck-model");
-        if req.stream {
-            sse(protocol::final_stream(rec.seq, model, text, req.include_usage))
+        match (self.protocol, req.stream) {
+            (Protocol::ChatCompletions, true) => sse(protocol::final_stream(rec.seq, model, text, req.include_usage)),
+            (Protocol::ChatCompletions, false) => Reply::json(200, &protocol::final_response(rec.seq, model, text)),
+            (Protocol::Responses, stream) => {
+                self.last_output = responses::message_items(rec.seq, text);
+                self.responses_reply(rec.seq, model, stream)
+            }
+        }
+    }
+
+    fn responses_reply(&self, seq: u64, model: &str, stream: bool) -> Reply {
+        if stream {
+            sse(responses::stream(seq, model, &self.last_output))
         } else {
-            Reply::json(200, &protocol::final_response(rec.seq, model, text))
+            Reply::json(200, &responses::response(seq, model, &self.last_output, "completed"))
         }
     }
 }
@@ -328,6 +471,7 @@ fn sse(body: String) -> Reply {
         status: 200,
         content_type: "text/event-stream",
         headers: vec![("cache-control", "no-cache".into())],
+        delivery: Delivery::Normal,
         body: body.into_bytes(),
     }
 }

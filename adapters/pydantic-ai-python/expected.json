@@ -1,0 +1,31 @@
+{
+  "runtime": "pydantic-ai",
+  "version": "2.54.0",
+  "protocol": "openai-chat-completions",
+  "default_verdict": "PASS",
+  "scenarios": {
+    "truncated-response": {
+      "verdict": "PASS",
+      "stream": {
+        "verdict": "UNKNOWN",
+        "why": "In streaming mode a cut-off SSE stream raises pydantic_ai.exceptions.ModelAPIError (Connection error.) and is not retried; non-streaming requests are retried and PASS."
+      }
+    },
+    "mixed-content": {
+      "verdict": "UNKNOWN",
+      "why": "Chat Completions tool results cannot carry images; Pydantic AI moves the image elsewhere in the request (outside the tool message)."
+    },
+    "embedded-resource": {
+      "verdict": "UNKNOWN",
+      "why": "Not representable; Pydantic AI drops both embedded resources (text blocks arrive unchanged)."
+    },
+    "resource-link": {
+      "verdict": "UNKNOWN",
+      "why": "Not representable; Pydantic AI includes the resource_link (its URI) inside the tool text."
+    },
+    "audio-content": {
+      "verdict": "UNKNOWN",
+      "why": "Not representable; Pydantic AI moves the audio elsewhere in the request (outside the tool message)."
+    }
+  }
+}

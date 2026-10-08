@@ -18,6 +18,44 @@ pub enum Tier {
     PostMvp,
     /// Opt-in (`--extended`): large and threshold-adjacent payload sizes.
     Extended,
+    /// Opt-in (`--probes`): content the provider protocol cannot represent in a
+    /// tool result (images, resources). The best possible verdict is UNKNOWN;
+    /// the report shows what the runtime did with the content.
+    Probe,
+}
+
+/// Deterministic failure injected by the fake provider on the first
+/// request(s) that carry tool results. A runtime that retries must re-send the
+/// results unchanged; one that gives up makes the scenario UNKNOWN.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    None,
+    /// Answer the first `times` result requests with this HTTP status.
+    Status {
+        code: u16,
+        times: u32,
+    },
+    /// Read the whole request, then close the connection without answering.
+    Disconnect,
+    /// Read the whole request, then reset the TCP connection (RST).
+    Reset,
+    /// Send the response headers and only the first half of the body, then close.
+    Truncate,
+    /// Answer the first result request only after this delay.
+    Delay {
+        ms: u64,
+    },
+}
+
+impl Fault {
+    /// How many result requests fail before one is answered normally.
+    pub fn failures(self) -> u32 {
+        match self {
+            Fault::Status { times, .. } => times,
+            Fault::Disconnect | Fault::Reset | Fault::Truncate => 1,
+            Fault::None | Fault::Delay { .. } => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,9 +74,9 @@ pub struct ScenarioDef {
     /// Assistant turns. Each inner slice lists the call IDs issued together in
     /// one provider response.
     pub turns: &'static [&'static [&'static str]],
-    /// Answer the first request that carries tool results with a deterministic
-    /// HTTP 429, then expect the runtime to retry.
-    pub rate_limit_first_result: bool,
+    /// A deterministic transport fault applied to the first request(s) that
+    /// carry tool results; the runtime is then expected to retry.
+    pub fault: Fault,
     /// Ask the runtime to submit the completed tool-result history again,
     /// either in the same process or after a checkpoint/restart.
     pub replay: ReplayMode,
@@ -59,7 +97,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         kind: ContentKind::Text,
         tier: Tier::Mvp,
         turns: &[&[CALL_1]],
-        rate_limit_first_result: false,
+        fault: Fault::None,
         replay: ReplayMode::None,
     },
     ScenarioDef {
@@ -68,7 +106,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         kind: ContentKind::Text,
         tier: Tier::Mvp,
         turns: &[&[CALL_1]],
-        rate_limit_first_result: false,
+        fault: Fault::None,
         replay: ReplayMode::None,
     },
     ScenarioDef {
@@ -77,7 +115,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         kind: ContentKind::Text,
         tier: Tier::Mvp,
         turns: &[&[CALL_1]],
-        rate_limit_first_result: false,
+        fault: Fault::None,
         replay: ReplayMode::None,
     },
     ScenarioDef {
@@ -86,7 +124,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         kind: ContentKind::Text,
         tier: Tier::Mvp,
         turns: &[&[CALL_1]],
-        rate_limit_first_result: false,
+        fault: Fault::None,
         replay: ReplayMode::None,
     },
     ScenarioDef {
@@ -95,7 +133,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         kind: ContentKind::Text,
         tier: Tier::Mvp,
         turns: &[&[CALL_1, CALL_2]],
-        rate_limit_first_result: false,
+        fault: Fault::None,
         replay: ReplayMode::None,
     },
     ScenarioDef {
@@ -104,7 +142,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         kind: ContentKind::Text,
         tier: Tier::PostMvp,
         turns: &[&[CALL_1], &[CALL_2]],
-        rate_limit_first_result: false,
+        fault: Fault::None,
         replay: ReplayMode::None,
     },
     ScenarioDef {
@@ -113,7 +151,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         kind: ContentKind::Json,
         tier: Tier::PostMvp,
         turns: &[&[CALL_1]],
-        rate_limit_first_result: false,
+        fault: Fault::None,
         replay: ReplayMode::None,
     },
     ScenarioDef {
@@ -122,7 +160,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         kind: ContentKind::Text,
         tier: Tier::PostMvp,
         turns: &[&[CALL_1]],
-        rate_limit_first_result: true,
+        fault: Fault::Status { code: 429, times: 1 },
         replay: ReplayMode::None,
     },
     ScenarioDef {
@@ -131,7 +169,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         kind: ContentKind::Error,
         tier: Tier::PostMvp,
         turns: &[&[CALL_1]],
-        rate_limit_first_result: false,
+        fault: Fault::None,
         replay: ReplayMode::None,
     },
     ScenarioDef {
@@ -140,7 +178,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         kind: ContentKind::Text,
         tier: Tier::PostMvp,
         turns: &[&[CALL_1]],
-        rate_limit_first_result: false,
+        fault: Fault::None,
         replay: ReplayMode::None,
     },
     ScenarioDef {
@@ -149,7 +187,7 @@ static SCENARIOS: &[ScenarioDef] = &[
         kind: ContentKind::Text,
         tier: Tier::PostMvp,
         turns: &[&[CALL_1]],
-        rate_limit_first_result: false,
+        fault: Fault::None,
         replay: ReplayMode::SameProcess,
     },
     ScenarioDef {
@@ -158,8 +196,143 @@ static SCENARIOS: &[ScenarioDef] = &[
         kind: ContentKind::Text,
         tier: Tier::PostMvp,
         turns: &[&[CALL_1]],
-        rate_limit_first_result: false,
+        fault: Fault::None,
         replay: ReplayMode::Resume,
+    },
+    ScenarioDef {
+        id: "retry-500",
+        summary: "the result request gets HTTP 500 once; the retry must be unchanged",
+        kind: ContentKind::Text,
+        tier: Tier::PostMvp,
+        turns: &[&[CALL_1]],
+        fault: Fault::Status { code: 500, times: 1 },
+        replay: ReplayMode::None,
+    },
+    ScenarioDef {
+        id: "retry-503",
+        summary: "the result request gets HTTP 503 once; the retry must be unchanged",
+        kind: ContentKind::Text,
+        tier: Tier::PostMvp,
+        turns: &[&[CALL_1]],
+        fault: Fault::Status { code: 503, times: 1 },
+        replay: ReplayMode::None,
+    },
+    ScenarioDef {
+        id: "retry-repeated",
+        summary: "the result request gets HTTP 429 twice in a row; every retry must be unchanged",
+        kind: ContentKind::Text,
+        tier: Tier::PostMvp,
+        turns: &[&[CALL_1]],
+        fault: Fault::Status { code: 429, times: 2 },
+        replay: ReplayMode::None,
+    },
+    ScenarioDef {
+        id: "disconnect-after-request",
+        summary: "the provider reads the result request, then closes the connection without answering",
+        kind: ContentKind::Text,
+        tier: Tier::PostMvp,
+        turns: &[&[CALL_1]],
+        fault: Fault::Disconnect,
+        replay: ReplayMode::None,
+    },
+    ScenarioDef {
+        id: "connection-reset",
+        summary: "the provider reads the result request, then resets the TCP connection",
+        kind: ContentKind::Text,
+        tier: Tier::PostMvp,
+        turns: &[&[CALL_1]],
+        fault: Fault::Reset,
+        replay: ReplayMode::None,
+    },
+    ScenarioDef {
+        id: "truncated-response",
+        summary: "the response to the result request is cut off halfway (body or SSE stream)",
+        kind: ContentKind::Text,
+        tier: Tier::PostMvp,
+        turns: &[&[CALL_1]],
+        fault: Fault::Truncate,
+        replay: ReplayMode::None,
+    },
+    ScenarioDef {
+        id: "slow-response",
+        summary: "the response to the result request arrives after 3 seconds; no duplicate or changed result",
+        kind: ContentKind::Text,
+        tier: Tier::PostMvp,
+        turns: &[&[CALL_1]],
+        fault: Fault::Delay { ms: 3000 },
+        replay: ReplayMode::None,
+    },
+    ScenarioDef {
+        id: "multi-text-blocks",
+        summary: "three MCP text blocks; each must arrive unchanged and in order",
+        kind: ContentKind::Text,
+        tier: Tier::PostMvp,
+        turns: &[&[CALL_1]],
+        fault: Fault::None,
+        replay: ReplayMode::None,
+    },
+    ScenarioDef {
+        id: "structured-content",
+        summary: "text summary plus structuredContent; either representation must arrive unchanged",
+        kind: ContentKind::Text,
+        tier: Tier::PostMvp,
+        turns: &[&[CALL_1]],
+        fault: Fault::None,
+        replay: ReplayMode::None,
+    },
+    ScenarioDef {
+        id: "error-with-metadata",
+        summary: "isError result with structuredContent and _meta; the error text must arrive unchanged",
+        kind: ContentKind::Error,
+        tier: Tier::PostMvp,
+        turns: &[&[CALL_1]],
+        fault: Fault::None,
+        replay: ReplayMode::None,
+    },
+    ScenarioDef {
+        id: "mcp-protocol-error",
+        summary: "JSON-RPC error instead of a result; the exact error message must reach the provider",
+        kind: ContentKind::Error,
+        tier: Tier::PostMvp,
+        turns: &[&[CALL_1]],
+        fault: Fault::None,
+        replay: ReplayMode::None,
+    },
+    ScenarioDef {
+        id: "mixed-content",
+        summary: "text, image, text; text blocks must survive, the image is reported (probe)",
+        kind: ContentKind::Text,
+        tier: Tier::Probe,
+        turns: &[&[CALL_1]],
+        fault: Fault::None,
+        replay: ReplayMode::None,
+    },
+    ScenarioDef {
+        id: "embedded-resource",
+        summary: "text plus embedded text and blob resources (probe)",
+        kind: ContentKind::Text,
+        tier: Tier::Probe,
+        turns: &[&[CALL_1]],
+        fault: Fault::None,
+        replay: ReplayMode::None,
+    },
+    ScenarioDef {
+        id: "resource-link",
+        summary: "text plus a resource_link block (probe)",
+        kind: ContentKind::Text,
+        tier: Tier::Probe,
+        turns: &[&[CALL_1]],
+        fault: Fault::None,
+        replay: ReplayMode::None,
+    },
+    ScenarioDef {
+        id: "audio-content",
+        summary: "text plus an audio block (probe)",
+        kind: ContentKind::Text,
+        tier: Tier::Probe,
+        turns: &[&[CALL_1]],
+        fault: Fault::None,
+        replay: ReplayMode::None,
     },
 ];
 
@@ -222,7 +395,7 @@ pub fn find(id: &str) -> Option<&'static ScenarioDef> {
         kind: ContentKind::Text,
         tier: Tier::Extended,
         turns: &[&[CALL_1]],
-        rate_limit_first_result: false,
+        fault: Fault::None,
         replay: ReplayMode::None,
     }));
     cache.push(def);

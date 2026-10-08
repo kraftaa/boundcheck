@@ -1,4 +1,4 @@
-use boundarycheck::{adapter, cli, mcp, model, process, provider, report, runner, scenario};
+use boundarycheck::{adapter, cli, isolation, mcp, model, process, report, runner, scenario};
 
 use clap::Parser;
 use cli::{Cli, Cmd, RunArgs};
@@ -14,6 +14,7 @@ fn main() {
                     scenario::Tier::Mvp => "mvp",
                     scenario::Tier::PostMvp => "post-mvp",
                     scenario::Tier::Extended => "extended",
+                    scenario::Tier::Probe => "probe",
                 };
                 println!("{:<22} {:<9} {}", s.id, tier, s.summary);
             }
@@ -32,6 +33,23 @@ fn main() {
 }
 
 fn run(args: RunArgs) -> i32 {
+    if args.isolation == "docker" {
+        let Some(image) = args.image.clone() else {
+            return config_error("--isolation docker needs --image <image with the runtime's dependencies>");
+        };
+        let binary = match args.isolation_binary.clone().map(Ok).unwrap_or_else(std::env::current_exe) {
+            Ok(b) => b,
+            Err(e) => return config_error(&format!("cannot locate boundarycheck: {e}")),
+        };
+        let cwd = match std::env::current_dir() {
+            Ok(c) => c,
+            Err(e) => return config_error(&format!("cannot read the current directory: {e}")),
+        };
+        return match isolation::plan(&args, &args.container_engine, &image, &binary, &cwd) {
+            Ok(plan) => isolation::run(plan),
+            Err(e) => config_error(&e),
+        };
+    }
     let adapter = match adapter::load(&args.adapter) {
         Ok(a) => a,
         Err(e) => return config_error(&e),
@@ -41,7 +59,11 @@ fn run(args: RunArgs) -> i32 {
         Some(c) => adapter.capabilities.iter().any(|a| a == c),
     };
     let scenarios = if args.scenarios.is_empty() {
-        let mut v: Vec<&'static scenario::ScenarioDef> = scenario::all().iter().filter(supports).collect();
+        let mut v: Vec<&'static scenario::ScenarioDef> = scenario::all()
+            .iter()
+            .filter(supports)
+            .filter(|s| args.probes || s.tier != scenario::Tier::Probe)
+            .collect();
         if args.extended {
             v.extend(scenario::extended());
         }
@@ -79,7 +101,7 @@ fn run(args: RunArgs) -> i32 {
     process::install_signal_handler();
 
     println!("boundarycheck {}", env!("CARGO_PKG_VERSION"));
-    println!("adapter {} ({}), protocol {}\n", adapter.name, adapter.source, provider::protocol::PROTOCOL);
+    println!("adapter {} ({}), protocol {}\n", adapter.name, adapter.source, adapter.protocol().name());
     let report = runner::run(runner::RunConfig {
         adapter,
         command: args.command,
@@ -101,11 +123,15 @@ fn run(args: RunArgs) -> i32 {
     if let Some(e) = &report.harness_error {
         eprintln!("boundarycheck: harness error: {e}");
     }
-    if let Some(dir) = &report.workdir {
-        println!("work directory kept: {dir}");
-    }
-    if let Some(dir) = &report.artifacts {
-        println!("artifacts: {dir}");
+    // Inside --isolation docker the paths are container paths; the host side
+    // prints where the files ended up.
+    if report.isolation.is_none() {
+        if let Some(dir) = &report.workdir {
+            println!("work directory kept: {dir}");
+        }
+        if let Some(dir) = &report.artifacts {
+            println!("artifacts: {dir}");
+        }
     }
     let s = &report.summary;
     println!("Summary: {} passed, {} failed, {} unknown", s.passed, s.failed, s.unknown);

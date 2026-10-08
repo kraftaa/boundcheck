@@ -1,0 +1,55 @@
+[package]
+name = "boundarycheck-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order", "raw_value"] }
+tempfile = "3"
+
+[dependencies.boundarycheck]
+path = ".."
+
+# Keep the fuzz crate out of the main workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "provider_request"
+path = "fuzz_targets/provider_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mcp_server"
+path = "fuzz_targets/mcp_server.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "classify_text"
+path = "fuzz_targets/classify_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json_compare"
+path = "fuzz_targets/json_compare.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_request"
+path = "fuzz_targets/http_request.rs"
+test = false
+doc = false
+bench = false

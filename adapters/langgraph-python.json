@@ -1,0 +1,28 @@
+{
+  "name": "langgraph-python",
+  "description": "LangGraph create_react_agent with langchain-openai ChatOpenAI and langchain-mcp-adapters (stdio). Launch with adapters/langgraph-python/agent.py.",
+  "provider_protocol": "openai-chat-completions",
+  "environment": {
+    "OPENAI_BASE_URL": "{{provider_base_url}}",
+    "OPENAI_API_KEY": "boundarycheck-test-key",
+    "BOUNDARYCHECK_MCP_COMMAND": "{{mcp_command}}",
+    "BOUNDARYCHECK_MCP_ARGS": "{{mcp_args_json}}",
+    "BOUNDARYCHECK_PROMPT": "{{scenario_prompt}}",
+    "BOUNDARYCHECK_RUNTIME_INFO": "{{runtime_info_path}}",
+    "BOUNDARYCHECK_PROVIDER_PROTOCOL": "openai-chat-completions"
+  },
+  "readiness": {
+    "type": "provider-request",
+    "timeout_seconds": 60
+  },
+  "completion": {
+    "type": "provider-scenario-complete",
+    "exit_grace_seconds": 10
+  },
+  "shutdown": {
+    "grace_seconds": 3
+  },
+  "runtime_version": {
+    "type": "report-file"
+  }
+}
