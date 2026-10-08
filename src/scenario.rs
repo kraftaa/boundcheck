@@ -16,6 +16,8 @@ pub enum ContentKind {
 pub enum Tier {
     Mvp,
     PostMvp,
+    /// Opt-in (`--extended`): large and threshold-adjacent payload sizes.
+    Extended,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,8 +167,71 @@ pub fn all() -> &'static [ScenarioDef] {
     SCENARIOS
 }
 
+/// Parameterized large-text scenarios: `large-text:<bytes>`, with an optional
+/// `k` (KiB) or `m` (MiB) suffix. Sizes are bounded so the provider-side
+/// request (JSON-escaped, up to ~3x) stays under the request body limit.
+pub const LARGE_TEXT_PREFIX: &str = "large-text:";
+pub const LARGE_TEXT_MIN: usize = 1024;
+pub const LARGE_TEXT_MAX: usize = 8 * 1024 * 1024;
+
+/// Sizes run by `--extended`: just below / at / just above round byte
+/// thresholds where truncation tends to appear, plus large payloads.
+pub const EXTENDED_SIZES: &[usize] =
+    &[65_535, 65_536, 65_537, 250 * 1024, 1_048_575, 1_048_576, 1_048_577, 5 * 1024 * 1024];
+
+/// Parse the byte count of a `large-text:<size>` id (None if not that form or out of range).
+pub fn large_text_size(id: &str) -> Option<usize> {
+    let spec = id.strip_prefix(LARGE_TEXT_PREFIX)?.to_ascii_lowercase();
+    let (digits, unit) = match spec.strip_suffix('k') {
+        Some(d) => (d.to_owned(), 1024),
+        None => match spec.strip_suffix('m') {
+            Some(d) => (d.to_owned(), 1024 * 1024),
+            None => (spec, 1),
+        },
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n = digits.parse::<usize>().ok()?.checked_mul(unit)?;
+    (LARGE_TEXT_MIN..=LARGE_TEXT_MAX).contains(&n).then_some(n)
+}
+
+/// Canonical id of a parameterized large-text scenario.
+pub fn large_text_id(bytes: usize) -> String {
+    format!("{LARGE_TEXT_PREFIX}{bytes}")
+}
+
 pub fn find(id: &str) -> Option<&'static ScenarioDef> {
-    SCENARIOS.iter().find(|s| s.id == id)
+    if let Some(s) = SCENARIOS.iter().find(|s| s.id == id) {
+        return Some(s);
+    }
+    let bytes = large_text_size(id)?;
+    let canonical = large_text_id(bytes);
+    // Parameterized definitions are created once per id and live for the
+    // whole process (a handful per run), so they can be `&'static`.
+    static DYNAMIC: std::sync::Mutex<Vec<&'static ScenarioDef>> = std::sync::Mutex::new(Vec::new());
+    let mut cache = DYNAMIC.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(s) = cache.iter().find(|s| s.id == canonical) {
+        return Some(s);
+    }
+    let def: &'static ScenarioDef = Box::leak(Box::new(ScenarioDef {
+        id: Box::leak(canonical.into_boxed_str()),
+        summary: Box::leak(
+            format!("{}-byte text with five positional sentinels", crate::report::thousands(bytes)).into_boxed_str(),
+        ),
+        kind: ContentKind::Text,
+        tier: Tier::Extended,
+        turns: &[&[CALL_1]],
+        rate_limit_first_result: false,
+        replay: ReplayMode::None,
+    }));
+    cache.push(def);
+    Some(def)
+}
+
+/// The `--extended` scenarios.
+pub fn extended() -> Vec<&'static ScenarioDef> {
+    EXTENDED_SIZES.iter().filter_map(|n| find(&large_text_id(*n))).collect()
 }
 
 impl ScenarioDef {

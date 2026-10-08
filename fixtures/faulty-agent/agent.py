@@ -4,6 +4,7 @@ Usage: agent.py --fault NAME[,NAME...] [--pid-file PATH]
 
 Faults (all injected on purpose; none of them is a real framework defect):
   truncate          keep the first 50,000 bytes of long results
+  truncate-64k      keep the first 65,536 bytes (a round-number threshold)
   head-tail         keep 25,000 head + 25,000 tail bytes of long results
   head-tail-marker  like head-tail, with "...[truncated]..." in between
   utf8-split        cut long results inside a multi-byte character (U+FFFD)
@@ -12,6 +13,7 @@ Faults (all injected on purpose; none of them is a real framework defect):
   missing           drop the last tool message of each turn
   retry-mutation    alter results only when re-sending after HTTP 429
   replay-mutation   alter persisted/replayed results after the first delivery
+  replay-drop       drop tool results from the replayed history
   normalize         apply Unicode NFC normalization to results
   json-float        re-encode JSON integers as floats (precision loss)
   reserialize-json  pretty-print JSON results (legal: semantics unchanged)
@@ -88,6 +90,7 @@ def json_dup_key(text):
 
 CONTENT_FAULTS = {
     "json-dup-key": json_dup_key,
+    "truncate-64k": lambda t: cut(t, 65_536),
     "truncate": lambda t: cut(t, LONG) if len(t.encode()) > LONG else t,
     "head-tail": lambda t: cut(t, 25_000) + tail(t, 25_000) if len(t.encode()) > LONG else t,
     "head-tail-marker": lambda t: cut(t, 25_000) + "\n...[truncated]...\n" + tail(t, 25_000) if len(t.encode()) > LONG else t,
@@ -131,6 +134,8 @@ class FaultyHooks(bc_agent.Hooks):
         return mutated
 
     def replay_messages(self, messages, resumed):
+        if "replay-drop" in self.faults:
+            return [m for m in messages if m["role"] != "tool"]
         if "replay-mutation" not in self.faults:
             return messages
         mutated = [dict(m) for m in messages]
@@ -165,7 +170,7 @@ def main(argv):
         elif arg == "--pid-file":
             pid_file = next(it)
     known = set(CONTENT_FAULTS) | {
-        "swap", "missing", "duplicate", "retry-mutation", "replay-mutation", "exit-early", "hang", "echo-user", "extra-id", "escape",
+        "swap", "missing", "duplicate", "retry-mutation", "replay-mutation", "replay-drop", "exit-early", "hang", "echo-user", "extra-id", "escape",
     }
     unknown = faults - known
     if unknown or not faults:

@@ -359,6 +359,7 @@ fn run_scenario(
         summary: def.summary.to_owned(),
         verdict: eval.verdict,
         classifications: eval.classifications.clone(),
+        underlying_classifications: eval.underlying_classifications.clone(),
         started_at,
         duration_ms: started.elapsed().as_millis(),
         findings: eval.findings.clone(),

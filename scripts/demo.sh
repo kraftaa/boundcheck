@@ -12,7 +12,7 @@ BC=./target/release/boundarycheck
 
 if [ ! -x .venv-agents/bin/python ]; then
   uv venv -q .venv-agents --python 3.13 &&
-    VIRTUAL_ENV=.venv-agents uv pip install -q -r adapters/openai-agents-python/requirements.txt || exit 2
+    VIRTUAL_ENV=.venv-agents uv pip install -q --require-hashes --no-deps -r adapters/openai-agents-python/requirements.lock || exit 2
 fi
 
 run() {

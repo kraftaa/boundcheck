@@ -32,7 +32,7 @@ $BC run --adapter fixture-agent -- python3 fixtures/faulty-agent/agent.py --faul
 
 # Real runtime: OpenAI Agents SDK (pinned)
 uv venv .venv-agents --python 3.13
-VIRTUAL_ENV=.venv-agents uv pip install -r adapters/openai-agents-python/requirements.txt
+VIRTUAL_ENV=.venv-agents uv pip install --require-hashes --no-deps -r adapters/openai-agents-python/requirements.lock
 $BC run --adapter openai-agents-python --report boundarycheck-report.json \
   -- .venv-agents/bin/python adapters/openai-agents-python/agent.py
 ```
@@ -68,7 +68,8 @@ boundarycheck list-adapters
 | `--artifacts <path>` | Save evidence for FAIL and UNKNOWN scenarios under `<path>/<run_id>/`. This also keeps the work directory. |
 | `--artifacts-all` | With `--artifacts`, also save evidence for passing scenarios. |
 | `--timeout <seconds>` | Per-scenario timeout, including startup. Default 60. |
-| `--scenario <name>` | Run only this scenario. Repeatable. By default every scenario supported by the selected adapter runs. |
+| `--scenario <name>` | Run only this scenario. Repeatable. By default every scenario supported by the selected adapter runs. Also accepts `large-text:<bytes>` for any size from 1,024 bytes to 8 MiB, with an optional `k` (KiB) or `m` (MiB) suffix, for example `large-text:65537` or `large-text:2m`. |
+| `--extended` | Also run the extended sizes: 65,535 / 65,536 / 65,537 bytes, 250 KiB, 1 MiB − 1 / 1 MiB / 1 MiB + 1, and 5 MiB. Cannot be combined with `--scenario`. |
 | `--keep-workdir` | Keep the temporary work directory and print its path. |
 | `--save-headers` | Save provider request headers with the artifacts. Credentials are always redacted. |
 
@@ -134,6 +135,7 @@ Replay-capable adapters also understand two deterministic control responses. `BO
 |---|---|
 | `exact-text` | A small UTF-8 text with characters that need JSON escaping (`"`, `\`, tab, U+0001, U+2028) arrives byte-identical. |
 | `large-text-1k` / `-50k` / `-100k` | 1,024 / 51,200 / 102,400 bytes of mixed 1–4 byte UTF-8. Sentinels `[[BC_SENTINEL:NNN:<call>]]` start at exactly 0%, 25%, 50% and 75%, and the last one ends at 100%. |
+| `large-text:<bytes>` | The same payload at any size (1 KiB to 8 MiB). Sizes just around round numbers show a cutoff exactly: a runtime that keeps 65,536 bytes passes `large-text:65536` and fails `large-text:65537`. `--extended` runs a preset list. |
 | `concurrent-two-tools` | Two calls are put in flight together: `BC_CALL_000001` → `city=Boston`, `BC_CALL_000002` → `city=Chicago`. Call A is delayed so B completes first; results must remain associated by ID. |
 | `sequential-history` | Two calls in consecutive turns. Every later request must still contain each earlier result exactly once and unchanged. |
 | `structured-json` | Nested JSON with `9007199254740993`, `12345678901234567890`, `19.990`, `1e-7`, `-0.0`, unicode keys and deep nesting. Compared semantically. |
@@ -196,9 +198,9 @@ Classes are derived from structural facts only: the common prefix and suffix, ex
 | `InvalidUtf8` | A U+FFFD was inserted at the boundary, or the request body was invalid UTF-8. |
 | `InvalidJson` | JSON scenario: the provider content no longer parses. |
 | `StructuralMutation` | JSON scenario: the canonical values differ (the first path is reported), or an object key appears twice, whose meaning depends on the parser. |
-| `RetryMutation` | The retried request differs from the MCP result, although attempt 1 matched it. |
+| `RetryMutation` | The retried request differs from the MCP result, although attempt 1 matched it. The finding's `underlying_class` keeps the proven cause (for example `ContentMutation`). |
 | `ContentMutation` | Any other proven difference: Unicode normalization (NFC/NFD/NFKC/NFKD), inserted text, or replaced text. |
-| `ReplayMutation` | A result that arrived intact originally is missing, duplicated, reassociated or changed in replayed or restored history. |
+| `ReplayMutation` | A result that arrived intact originally is missing, duplicated, reassociated or changed in replayed or restored history. The finding's `underlying_class` keeps the cause (`MissingResult`, `DuplicateResult`, `WrongToolCallAssociation`, …); each scenario also lists `underlying_classifications`. The human output shows `ReplayMutation (underlying: MissingResult)`. |
 | `ErrorStatusMutation` | Reserved because Chat Completions cannot represent the MCP error flag. |
 
 The human output reports the most specific proven fact. All findings are in the JSON report.
@@ -290,7 +292,7 @@ Built-in adapters:
 
 | | |
 |---|---|
-| Runtime | `openai-agents` **0.23.1**, with `openai` 3.26.0 and `mcp` 2.3.0 (pinned in `adapters/openai-agents-python/requirements.txt`) |
+| Runtime | `openai-agents` **0.23.1**, with `openai` 3.26.0 and `mcp` 2.3.0 (pinned in `adapters/openai-agents-python/requirements.txt`; the full dependency set is hash-locked in `requirements.lock`) |
 | Python | 3.13.5 |
 | OS | macOS 26.7 (Darwin 25.6.0, arm64) |
 | Result | 12/12 PASS, both non-streaming and streaming (`--stream`) |
@@ -308,7 +310,8 @@ No framework defect was found. Every FAIL in this repository's demo and tests co
 
 - `fixtures/conforming-agent/agent.py` forwards results unchanged. With `--reorder`, it reverses concurrent results; this is legal and must still PASS.
 - `fixtures/faulty-agent/agent.py --fault NAME[,NAME…]` injects deliberate faults:
-  - `truncate`, `head-tail`, `head-tail-marker`, `utf8-split`
+  - `truncate`, `truncate-64k`, `head-tail`, `head-tail-marker`, `utf8-split`
+  - `replay-drop` (drops tool results from replayed history)
   - `swap`, `duplicate`, `missing`, `retry-mutation`, `replay-mutation`
   - `normalize`, `json-float`
   - `json-dup-key` (hides a different value in an earlier duplicate key)
@@ -359,7 +362,7 @@ DIR/BC_RUN_000001/
 ## Testing
 
 ```bash
-cargo test     # 37 unit tests + 14 end-to-end tests (requires python3)
+cargo test     # 38 unit tests + 16 end-to-end tests + 3 property tests (requires python3)
 ```
 
 The unit tests cover:
@@ -393,6 +396,8 @@ The integration tests launch the real binary, the provider, the MCP server and t
 - a result copied into a non-tool message, and a result under an unissued ID
 - a hidden duplicate JSON key
 - a `setsid()` child that leaves the process group
+- the underlying cause of retry and replay findings
+- a 65,536-byte cutoff isolated by the threshold sizes
 - Ctrl-C: children killed, work directory removed, exit code 2
 - persisted replay after a real process restart, including deliberate replay-only mutation
 - report-file symlink refusal
@@ -429,3 +434,7 @@ fixtures/                conforming and faulty fixture runtimes
 tests/integration.rs     end-to-end tests
 scripts/demo.sh          reproducible demonstration
 ```
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your option.

@@ -142,6 +142,45 @@ fn faulty_fixture_faults_are_detected() {
 }
 
 #[test]
+fn retry_and_replay_findings_keep_their_underlying_cause() {
+    let cases = [
+        ("retry-mutation", "retry-429", "RetryMutation", "ContentMutation"),
+        ("replay-mutation", "replay-history", "ReplayMutation", "ContentMutation"),
+        ("replay-drop", "replay-history", "ReplayMutation", "MissingResult"),
+        ("replay-drop", "persistence-resume", "ReplayMutation", "MissingResult"),
+    ];
+    for (fault, id, class, cause) in cases {
+        let r = faulty(fault, &[id]);
+        let s = scenario(&r, id);
+        let f = s["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["class"] == class)
+            .unwrap_or_else(|| panic!("{fault}: {s}"));
+        assert_eq!(f["underlying_class"], cause, "{fault}");
+        assert!(s["underlying_classifications"].as_array().unwrap().iter().any(|c| c == cause), "{fault}");
+        assert!(r.stdout.contains(&format!("{class} (underlying: {cause})")), "{fault}: {}", r.stdout);
+    }
+}
+
+#[test]
+fn threshold_sizes_isolate_a_round_number_cutoff() {
+    let sizes = ["large-text:65535", "large-text:65536", "large-text:65537", "large-text:1m"];
+    let r = faulty("truncate-64k", &sizes);
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    assert_eq!(scenario(&r, "large-text:65535")["verdict"], "PASS");
+    assert_eq!(scenario(&r, "large-text:65536")["verdict"], "PASS");
+    for id in ["large-text:65537", "large-text:1048576"] {
+        let f = &scenario(&r, id)["findings"][0];
+        assert_eq!(f["class"], "Truncation", "{id}");
+        assert_eq!(f["text_difference"]["provider_bytes"], 65536, "{id}");
+    }
+    let bad = conforming(&["--scenario", "large-text:9m"]);
+    assert_eq!(bad.code, 2);
+}
+
+#[test]
 fn truncation_evidence_is_precise() {
     let r = faulty("head-tail", &["large-text-100k"]);
     let f = &scenario(&r, "large-text-100k")["findings"][0];
