@@ -4,6 +4,7 @@ The shim only wires the SDK to the endpoints boundarycheck provides; all tool
 result handling is done by the SDK itself:
 
   * model:  OpenAIChatCompletionsModel  -> POST {OPENAI_BASE_URL}/chat/completions
+            (with --responses: OpenAIResponsesModel -> POST {OPENAI_BASE_URL}/responses)
   * tools:  MCPServerStdio              -> the boundarycheck fake MCP server
 
 Pass --stream to drive the agent with Runner.run_streamed (SSE responses).
@@ -16,7 +17,14 @@ import os
 import platform
 import sys
 
-from agents import Agent, OpenAIChatCompletionsModel, Runner, SQLiteSession, set_tracing_disabled
+from agents import (
+    Agent,
+    OpenAIChatCompletionsModel,
+    OpenAIResponsesModel,
+    Runner,
+    SQLiteSession,
+    set_tracing_disabled,
+)
 from agents.mcp import MCPServerStdio
 from openai import AsyncOpenAI
 
@@ -58,7 +66,9 @@ async def main():
             name="boundarycheck-agent",
             instructions="Call tools exactly as instructed.",
             mcp_servers=[server],
-            model=OpenAIChatCompletionsModel(model="boundarycheck-model", openai_client=client),
+            model=(OpenAIResponsesModel if "--responses" in sys.argv[1:] else OpenAIChatCompletionsModel)(
+                model="boundarycheck-model", openai_client=client
+            ),
         )
         prompt = os.environ["BOUNDARYCHECK_PROMPT"]
         scenario = os.environ["BOUNDARYCHECK_SCENARIO_ID"]

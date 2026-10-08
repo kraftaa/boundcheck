@@ -56,12 +56,31 @@ pub struct RunArgs {
     /// Also run the extended sizes: 65,535/65,536/65,537, 250 KiB, 1 MiB-1/1 MiB/1 MiB+1, 5 MiB.
     #[arg(long, conflicts_with = "scenarios")]
     pub extended: bool,
+    /// Also run probe scenarios: content the provider protocol cannot carry in a
+    /// tool result (images, audio, resources). Their best verdict is UNKNOWN; the
+    /// report shows what the runtime did with each block.
+    #[arg(long, conflicts_with = "scenarios")]
+    pub probes: bool,
     /// Preserve the temporary work directory.
     #[arg(long)]
     pub keep_workdir: bool,
     /// Save provider request headers (credentials redacted) with the artifacts.
     #[arg(long, requires = "artifacts")]
     pub save_headers: bool,
+    /// `docker`: run boundarycheck and the runtime inside a locked-down container
+    /// (no network, read-only root, only the current directory mounted read-only).
+    #[arg(long, value_parser = ["none", "docker"], default_value = "none")]
+    pub isolation: String,
+    /// Container image for --isolation docker; it must contain the runtime's dependencies.
+    #[arg(long)]
+    pub image: Option<String>,
+    /// Linux build of boundarycheck to run inside the container (default: this
+    /// executable, which works only on Linux). See scripts/build-linux-binary.sh.
+    #[arg(long)]
+    pub isolation_binary: Option<PathBuf>,
+    /// Container engine CLI (docker, podman, nerdctl, ...).
+    #[arg(long, default_value = "docker")]
+    pub container_engine: String,
     /// The agent command, executed directly without a shell.
     #[arg(last = true, required = true, num_args = 1..)]
     pub command: Vec<String>,

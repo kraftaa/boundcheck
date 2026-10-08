@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6db6434601f3b158a717e2b92a39da79d20567211392189d522369f4f00a9571 # shrinks to sid = "mixed-content", m = None, stage = Delivery(0), wire = Responses { previous: false }
+cc 85244d919baf2086ff4dddb87c0f5228a8ecee863b7dad05a85833c2702e54ba # shrinks to sid = "sequential-history", m = None, stage = Delivery(0), wire = Responses { previous: true }
+cc 49d37f566e0f0c61023dc3d7412a439001d8e2ad085bd5b630cb6de5f42d5341 # shrinks to sid = "mcp-error", m = Normalize, stage = Delivery(0), wire = Chat

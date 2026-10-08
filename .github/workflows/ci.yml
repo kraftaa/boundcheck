@@ -25,12 +25,20 @@ jobs:
       - run: cargo test --locked
 
   real-runtime:
-    # OpenAI Agents SDK, installed only from hash-locked requirements.
+    # Each runtime is installed only from its hash-locked requirements and
+    # compared with its recorded baseline (docs/compatibility.md).
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         mode: ["", "--stream"]
+        runtime:
+          - { dir: openai-agents-python, adapter: openai-agents-python }
+          - { dir: pydantic-ai-python, adapter: pydantic-ai-python }
+          - { dir: langgraph-python, adapter: langgraph-python }
+        protocol:
+          - { suffix: "", flag: "", baseline: expected.json }
+          - { suffix: "-responses", flag: "--responses", baseline: expected-responses.json }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,14 +49,34 @@ jobs:
           python-version: "3.13"
       - run: cargo build --release --locked
       - run: |
-          python -m venv .venv-agents
-          .venv-agents/bin/python -m pip install --require-hashes --no-deps \
-            -r adapters/openai-agents-python/requirements.lock
-          .venv-agents/bin/python -m pip check
-      - run: |
-          ./target/release/boundarycheck run --adapter openai-agents-python --extended \
-            --report boundarycheck-report.json \
-            -- .venv-agents/bin/python adapters/openai-agents-python/agent.py ${{ matrix.mode }}
+          python -m venv .venv-runtime
+          .venv-runtime/bin/python -m pip install --require-hashes --no-deps \
+            -r adapters/${{ matrix.runtime.dir }}/requirements.lock
+          .venv-runtime/bin/python -m pip check
+      - name: Run boundarycheck against the pinned runtime
+        # Exit 1/3 are expected (documented runtime behavior, probes); the
+        # baseline check below decides. Exit 2 (harness error) fails the job.
+        run: |
+          set +e
+          ./target/release/boundarycheck run --adapter ${{ matrix.runtime.adapter }}${{ matrix.protocol.suffix }} \
+            --extended --probes --report boundarycheck-report.json \
+            -- .venv-runtime/bin/python adapters/${{ matrix.runtime.dir }}/agent.py ${{ matrix.protocol.flag }} ${{ matrix.mode }}
+          code=$?
+          [ "$code" -ne 2 ] || exit 2
+      - name: Compare with the recorded compatibility baseline
+        run: python3 scripts/check_expected.py boundarycheck-report.json adapters/${{ matrix.runtime.dir }}/${{ matrix.protocol.baseline }}
+
+  isolation:
+    # --isolation docker end to end: no network, no host files, no inherited secrets.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker pull python:3.13-slim-trixie
+      - run: cargo test --locked --test integration docker_isolation -- --nocapture
+        env:
+          BOUNDARYCHECK_DOCKER_IMAGE: python:3.13-slim-trixie
 
   audit:
     runs-on: ubuntu-latest

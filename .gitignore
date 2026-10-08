@@ -11,3 +11,7 @@ __pycache__/
 !.env.example
 *.pem
 *.key
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage

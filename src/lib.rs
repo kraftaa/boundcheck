@@ -6,6 +6,7 @@
 pub mod adapter;
 pub mod cli;
 pub mod compare;
+pub mod isolation;
 pub mod mcp;
 pub mod model;
 pub mod process;
