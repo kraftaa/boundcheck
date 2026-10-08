@@ -6,7 +6,72 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use serde_json::{json, Value};
 
+/// Name of the Chat Completions protocol (the default).
 pub const PROTOCOL: &str = "openai-chat-completions";
+
+/// The provider protocols boundarycheck implements. Each one has its own
+/// endpoint, request parser and response builders; the comparison engine
+/// only sees the protocol-neutral [`ParsedRequest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum Protocol {
+    /// `POST {base}/chat/completions`
+    ChatCompletions,
+    /// `POST {base}/responses`
+    Responses,
+}
+
+impl Protocol {
+    pub const ALL: [Protocol; 2] = [Protocol::ChatCompletions, Protocol::Responses];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Protocol::ChatCompletions => PROTOCOL,
+            Protocol::Responses => "openai-responses",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Protocol> {
+        Protocol::ALL.into_iter().find(|p| p.name() == name)
+    }
+
+    pub fn endpoint(self) -> &'static str {
+        match self {
+            Protocol::ChatCompletions => "/chat/completions",
+            Protocol::Responses => "/responses",
+        }
+    }
+
+    /// Which MCP block types a tool result can carry in this protocol.
+    pub fn representable(self) -> crate::model::content::Representable {
+        use crate::model::content::Representable;
+        match self {
+            Protocol::ChatCompletions => Representable::CHAT_COMPLETIONS,
+            Protocol::Responses => Representable::RESPONSES,
+        }
+    }
+}
+
+/// One element of a message's content, in order.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Part {
+    Text(String),
+    /// An image, identified by the SHA-256 of its decoded `data:` URL bytes when inline.
+    Image {
+        url: String,
+        sha256: Option<String>,
+    },
+    Other(String),
+}
+
+impl Part {
+    pub fn image(url: &str) -> Part {
+        let sha256 = url.strip_prefix("data:").and_then(|rest| rest.split_once(";base64,")).and_then(|(_, data)| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.decode(data).ok().map(|b| crate::compare::content::sha256_hex(&b))
+        });
+        Part::Image { url: url.to_owned(), sha256 }
+    }
+}
 
 /// Deterministic `created` timestamp used in every response.
 const CREATED: u64 = 1_700_000_000;
@@ -33,6 +98,8 @@ pub struct ParsedMessage {
     pub raw_content: Option<String>,
     /// IDs from an assistant message's `tool_calls`.
     pub tool_call_ids: Vec<String>,
+    /// Content parts in order (text and non-text); empty for string content.
+    pub parts: Vec<Part>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,6 +162,19 @@ pub fn parse_request(raw: &[u8]) -> Result<ParsedRequest, String> {
             .and_then(Value::as_array)
             .map(|calls| calls.iter().filter_map(|c| c.get("id").and_then(Value::as_str)).map(str::to_owned).collect())
             .unwrap_or_default();
+        let parts = match m.get("content") {
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|p| match (p.get("type").and_then(Value::as_str), p.get("text").and_then(Value::as_str)) {
+                    (Some("text"), Some(t)) => Part::Text(t.to_owned()),
+                    (Some("image_url"), _) => {
+                        Part::image(p.pointer("/image_url/url").and_then(Value::as_str).unwrap_or(""))
+                    }
+                    (ty, _) => Part::Other(ty.unwrap_or("?").to_owned()),
+                })
+                .collect(),
+            _ => vec![],
+        };
         parsed.push(ParsedMessage {
             index,
             role: role.to_owned(),
@@ -102,6 +182,7 @@ pub fn parse_request(raw: &[u8]) -> Result<ParsedRequest, String> {
             content,
             raw_content: raw_tokens.get(index).cloned().flatten(),
             tool_call_ids,
+            parts,
         });
     }
     let tool_names = obj

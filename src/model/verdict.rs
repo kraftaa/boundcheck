@@ -73,6 +73,7 @@ pub enum UnknownReason {
     UnexpectedTransition,
     ToolArgumentsChanged,
     EvidenceInconsistent,
+    UnrepresentableContent,
 }
 
 impl UnknownReason {
@@ -89,6 +90,7 @@ impl UnknownReason {
             UnknownReason::UnexpectedTransition => "unexpected-transition",
             UnknownReason::ToolArgumentsChanged => "tool-arguments-changed",
             UnknownReason::EvidenceInconsistent => "evidence-inconsistent",
+            UnknownReason::UnrepresentableContent => "unrepresentable-content",
         }
     }
 }

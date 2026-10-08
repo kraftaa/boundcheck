@@ -18,6 +18,12 @@ Faults (all injected on purpose; none of them is a real framework defect):
   json-float        re-encode JSON integers as floats (precision loss)
   reserialize-json  pretty-print JSON results (legal: semantics unchanged)
   json-dup-key      insert an earlier, different duplicate "order" key (last-key-wins parsers hide it)
+  join-space        join several text blocks with " " (illegal separator)
+  join-newline      join several text blocks with "\n" (legal: must PASS)
+  drop-block        drop the last of several text blocks
+  send-structured   send structuredContent as JSON instead of the text (legal: must PASS)
+  structured-mutate send structuredContent as JSON with one value changed
+  error-generic     replace a JSON-RPC error message with generic wording
   echo-user         also copy each result into an extra user message
   extra-id          add a tool message under an identifier that was never issued
   exit-early        exit right after receiving tool calls
@@ -101,10 +107,35 @@ CONTENT_FAULTS = {
 }
 
 
+BLOCK_FAULTS = {"join-space", "join-newline", "drop-block", "send-structured", "structured-mutate", "error-generic"}
+
+
 class FaultyHooks(bc_agent.Hooks):
     def __init__(self, faults, pid_file):
         self.faults = faults
         self.pid_file = pid_file
+
+    def tool_result(self, result):
+        f = self.faults
+        if "__error__" in result:
+            return "the tool failed" if "error-generic" in f else bc_agent.tool_result_text(result)
+        texts = [b["text"] for b in result.get("content", []) if b.get("type") == "text"]
+        structured = result.get("structuredContent")
+        if structured is not None and "send-structured" in f:
+            return json.dumps(structured, ensure_ascii=False)
+        if structured is not None and "structured-mutate" in f:
+            changed = json.loads(json.dumps(structured))
+            first = next(iter(changed))
+            changed[first] = "mutated"
+            return json.dumps(changed, ensure_ascii=False)
+        if len(texts) > 1:
+            if "join-space" in f:
+                return " ".join(texts)
+            if "join-newline" in f:
+                return "\n".join(texts)
+            if "drop-block" in f:
+                return "".join(texts[:-1])
+        return bc_agent.tool_result_content(result, bc_agent.PROTOCOL)
 
     def tool_messages(self, messages):
         out = [dict(m) for m in messages]
@@ -170,7 +201,7 @@ def main(argv):
         elif arg == "--pid-file":
             pid_file = next(it)
     known = set(CONTENT_FAULTS) | {
-        "swap", "missing", "duplicate", "retry-mutation", "replay-mutation", "replay-drop", "exit-early", "hang", "echo-user", "extra-id", "escape",
+        "swap", "missing", "duplicate", "retry-mutation", "replay-mutation", "replay-drop", "exit-early", "hang", "echo-user", "extra-id", "escape", *BLOCK_FAULTS,
     }
     unknown = faults - known
     if unknown or not faults:

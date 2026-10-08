@@ -8,7 +8,7 @@ use crate::model::verdict::{exit_classification, exit_code, UnknownNote, Unknown
 use crate::process::{self, SpawnSpec};
 use crate::provider::recorder::redact_argv;
 use crate::provider::scenario::{Phase, ScenarioMachine};
-use crate::provider::{protocol::PROTOCOL, server::Provider};
+use crate::provider::server::Provider;
 use crate::report::*;
 use crate::scenario::{self, ScenarioDef};
 use base64::Engine;
@@ -45,7 +45,7 @@ pub fn run(cfg: RunConfig) -> RunReport {
         duration_ms: 0,
         adapter: AdapterInfo { name: cfg.adapter.name.clone(), source: cfg.adapter.source.clone() },
         runtime: RuntimeInfo { version_source: version_source(&cfg.adapter.runtime_version), ..Default::default() },
-        provider_protocol: PROTOCOL,
+        provider_protocol: cfg.adapter.protocol().name(),
         command: CommandInfo { argv: redact_argv(&cfg.command) },
         platform: Platform { os: std::env::consts::OS, arch: std::env::consts::ARCH },
         scenarios: vec![],
@@ -53,6 +53,7 @@ pub fn run(cfg: RunConfig) -> RunReport {
         artifacts: None,
         workdir: None,
         harness_error: None,
+        isolation: std::env::var("BOUNDARYCHECK_ISOLATION").ok(),
         exit: ExitSummary { code: 0, classification: "" },
     };
     let outcome = run_inner(&cfg, &run_id, &mut report);
@@ -166,7 +167,7 @@ fn run_scenario(
     write_private(&evidence, b"").map_err(|e| format!("cannot create MCP evidence file: {e}"))?;
     let runtime_info = dir.join("runtime-info.json");
     let (stdout_path, stderr_path) = (dir.join("runtime-stdout.log"), dir.join("runtime-stderr.log"));
-    let provider = Provider::start(run_id, def, cfg.save_headers)?;
+    let provider = Provider::start(run_id, def, cfg.adapter.protocol(), cfg.save_headers)?;
 
     let mcp_args: Vec<String> = vec![
         "mcp-server".into(),

@@ -1,0 +1,31 @@
+{
+  "runtime": "langgraph",
+  "version": "1.2.14",
+  "protocol": "openai-responses",
+  "default_verdict": "PASS",
+  "scenarios": {
+    "truncated-response": {
+      "verdict": "PASS",
+      "stream": {
+        "verdict": "UNKNOWN",
+        "why": "In streaming mode a cut-off SSE stream raises langchain_openai OpenAIConnectionError (Connection error.) and is not retried; non-streaming requests are retried and PASS."
+      }
+    },
+    "mcp-protocol-error": {
+      "verdict": "UNKNOWN",
+      "why": "langchain-mcp-adapters raises mcp McpError for a JSON-RPC error; the prebuilt ReAct agent does not catch it, so the run ends before a tool result is sent."
+    },
+    "embedded-resource": {
+      "verdict": "UNKNOWN",
+      "why": "Not representable in a Responses tool output; both embedded resources are dropped (text blocks arrive unchanged)."
+    },
+    "resource-link": {
+      "verdict": "UNKNOWN",
+      "why": "Not representable; the resource_link URI is carried elsewhere in the request, outside the tool output."
+    },
+    "audio-content": {
+      "verdict": "UNKNOWN",
+      "why": "langchain-mcp-adapters raises NotImplementedError ('AudioContent conversion to LangChain content blocks is not yet supported') and the run ends."
+    }
+  }
+}

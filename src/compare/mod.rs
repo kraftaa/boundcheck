@@ -9,9 +9,10 @@ use crate::compare::classify::{classify_text, TextDifference};
 use crate::compare::content::sha256_hex;
 use crate::compare::json::JsonDiff;
 use crate::mcp::payload;
+use crate::model::content::{self as mcp_content, Block, Representable};
 use crate::model::observation::{McpEvidence, ProviderObservation, ToolObservation};
 use crate::model::verdict::{decide, FailureClass, UnknownNote, UnknownReason, Verdict};
-use crate::provider::protocol::{MessageContent, ParsedMessage};
+use crate::provider::protocol::{MessageContent, ParsedMessage, Part, Protocol};
 use crate::provider::recorder::RequestRole;
 use crate::provider::scenario::{Phase, ScenarioMachine};
 use crate::scenario::{self, ContentKind, ScenarioDef, TOOL_NAME};
@@ -153,12 +154,33 @@ struct RawMcpItem<'a> {
 pub fn tool_observation(def: &ScenarioDef, rec: &McpEvidence) -> Option<ToolObservation> {
     let raw = base64::engine::general_purpose::STANDARD.decode(rec.response_b64.as_ref()?).ok()?;
     let v: Value = serde_json::from_slice(&raw).ok()?;
+    if let Some(message) = v.pointer("/error/message").and_then(Value::as_str) {
+        return Some(ToolObservation {
+            call_id: rec.call_id.clone()?,
+            content_sha256: sha256_hex(message.as_bytes()),
+            extracted_content: message.as_bytes().to_vec(),
+            raw_transport: raw.clone(),
+            raw_text_token: None,
+            json: None,
+            is_error: false,
+            blocks: vec![],
+            structured: None,
+            protocol_error: Some(message.to_owned()),
+            arguments: rec.arguments.clone(),
+            generated: rec.generated,
+        });
+    }
     let result = v.get("result")?;
     let items = result.get("content")?.as_array()?;
-    let mut text = String::new();
-    for item in items {
-        text.push_str(item.get("text")?.as_str()?);
-    }
+    let blocks = mcp_content::parse_blocks(items);
+    // The logical text is every text block, concatenated in order.
+    let text: String = blocks
+        .iter()
+        .filter_map(|b| match b {
+            Block::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
     let raw_text_token = std::str::from_utf8(&raw)
         .ok()
         .and_then(|s| serde_json::from_str::<RawMcpResponse>(s).ok())
@@ -177,6 +199,9 @@ pub fn tool_observation(def: &ScenarioDef, rec: &McpEvidence) -> Option<ToolObse
         raw_text_token,
         json,
         is_error: result.get("isError").and_then(Value::as_bool).unwrap_or(false),
+        blocks,
+        structured: result.get("structuredContent").cloned(),
+        protocol_error: None,
         arguments: rec.arguments.clone(),
         generated: rec.generated,
     })
@@ -194,6 +219,14 @@ fn provider_observation(m: &ParsedMessage) -> Option<ProviderObservation> {
         content_sha256: sha256_hex(text.as_bytes()),
         extracted_content: text.as_bytes().to_vec(),
         content_parts: parts,
+        images: m
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Image { sha256, .. } => Some(sha256.clone()),
+                _ => None,
+            })
+            .collect(),
     })
 }
 
@@ -413,17 +446,34 @@ pub fn evaluate(machine: &ScenarioMachine, mcp: &[McpEvidence], runner_unknowns:
                             _ => "not-comparable",
                         };
                     }
-                    let (text_state, json_state, finding) =
-                        compare_occurrence(def, exp, &obs, parsed.body_valid_utf8, &expected, req.seq, attempt);
+                    let c = compare_occurrence(
+                        def,
+                        machine.protocol,
+                        exp,
+                        &obs,
+                        parsed.body_valid_utf8,
+                        &req.raw,
+                        &expected,
+                        req.seq,
+                        attempt,
+                    );
+                    let (text_state, json_state, finding) = (c.text, c.json, c.finding);
                     if i == 0 {
                         side.extracted_text = text_state;
                         side.json_semantics = json_state;
                     }
-                    if json_state == "identical" && text_state == "changed" {
+                    if json_state == "identical" && text_state == "changed" && c.note.is_none() {
                         notes.push(format!(
                             "{call} (request #{}): text re-serialized; JSON semantics identical",
                             req.seq
                         ));
+                    }
+                    if let Some(n) = c.note {
+                        notes.push(format!("{call} (request #{}): {n}", req.seq));
+                    }
+                    if let Some(u) = c.unknown {
+                        side.outcome = "unrepresentable";
+                        unknowns.push(UnknownNote::new(UnknownReason::UnrepresentableContent, format!("{call}: {u}")));
                     }
                     if let Some(f) = finding {
                         if side.outcome == "match" {
@@ -605,21 +655,255 @@ fn missing_finding(
 
 /// Compare one provider-visible occurrence with the MCP emission.
 /// Returns (extracted_text state, json_semantics state, finding).
+/// Result of comparing one provider-visible occurrence with the MCP emission.
+struct Compared {
+    text: &'static str,
+    json: &'static str,
+    finding: Option<Finding>,
+    /// Set when the content cannot be represented by the provider protocol.
+    unknown: Option<String>,
+    /// A legal representation choice worth reporting (separator, structured content, ...).
+    note: Option<String>,
+}
+
+impl From<(&'static str, &'static str, Option<Finding>)> for Compared {
+    fn from((text, json, finding): (&'static str, &'static str, Option<Finding>)) -> Self {
+        Compared { text, json, finding, unknown: None, note: None }
+    }
+}
+
+/// Compare one occurrence. Representation policy (README "MCP content"):
+///
+/// - a JSON-RPC error must reach the provider as text containing its exact message;
+/// - several text blocks may be sent one part per block, or joined by `""`, `"\n"` or `"\n\n"`;
+/// - with `structuredContent`, sending the structured value (semantically equal) instead of the text is legal;
+/// - blocks the protocol cannot carry in a tool result make the scenario UNKNOWN,
+///   unless a text block was demonstrably lost or changed (then FAIL).
+#[allow(clippy::too_many_arguments)]
 fn compare_occurrence(
     def: &ScenarioDef,
+    protocol: Protocol,
     exp: &ToolObservation,
     obs: &ProviderObservation,
     body_valid_utf8: bool,
+    raw_request: &[u8],
     expected: &BTreeMap<String, ToolObservation>,
     seq: u64,
     attempt: Option<u32>,
-) -> (&'static str, &'static str, Option<Finding>) {
+) -> Compared {
     let call = exp.call_id.as_str();
     let (e, a) = (exp.extracted_content.as_slice(), obs.extracted_content.as_slice());
     let is_json = def.kind == ContentKind::Json;
-    if e == a {
-        return ("identical", if is_json { "identical" } else { "not-applicable" }, None);
+    let same = if is_json { "identical" } else { "not-applicable" };
+    if let Some(message) = &exp.protocol_error {
+        if a == message.as_bytes() {
+            return ("identical", "not-applicable", None).into();
+        }
+        if content::contains_intact(a, message.as_bytes()) {
+            let mut c: Compared = ("changed", "not-applicable", None).into();
+            c.note = Some("JSON-RPC error message delivered verbatim inside runtime wording".into());
+            return c;
+        }
+        let mut f = Finding::new(
+            FailureClass::ContentMutation,
+            call,
+            seq,
+            attempt,
+            "the exact JSON-RPC error message from the MCP server did not reach the provider".into(),
+        );
+        f.text_difference = classify_text(e, a);
+        return ("changed", "not-applicable", Some(f)).into();
     }
+    let texts: Vec<&str> = exp
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            Block::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let rep: Representable = protocol.representable();
+    let carried = |b: &Block| rep.carries(b);
+    let representable = exp.blocks.iter().all(carried);
+    if !representable {
+        // Every text block must still be there, unchanged and in order.
+        let mut from = 0;
+        for (i, t) in texts.iter().enumerate() {
+            match payload::find(&a[from..], t.as_bytes()) {
+                Some(p) => from += p + t.len(),
+                None => {
+                    let mut f = Finding::new(
+                        FailureClass::ContentMutation,
+                        call,
+                        seq,
+                        attempt,
+                        format!(
+                            "text block {} of {} is not present unchanged, in order, in the provider content",
+                            i + 1,
+                            texts.len()
+                        ),
+                    );
+                    f.text_difference = classify_text(t.as_bytes(), a);
+                    return ("changed", "not-applicable", Some(f)).into();
+                }
+            }
+        }
+        let others: Vec<&Block> = exp.blocks.iter().filter(|b| !carried(b)).collect();
+        let fate: Vec<String> = others
+            .iter()
+            .map(|b| {
+                let markers = b.markers();
+                let present =
+                    |hay: &[u8]| !markers.is_empty() && markers.iter().all(|m| payload::contains(hay, m.as_bytes()));
+                let place = if present(a) {
+                    "carried inside the tool content"
+                } else if present(raw_request) {
+                    "carried elsewhere in the request"
+                } else {
+                    "dropped"
+                };
+                format!("{} block {place}", b.kind())
+            })
+            .collect();
+        let kinds: Vec<&str> = others.iter().map(|b| b.kind()).collect();
+        let mut c: Compared = ("changed", "not-applicable", None).into();
+        c.unknown = Some(format!(
+            "{} cannot carry {} in a tool result; text blocks arrived unchanged; {}",
+            protocol.name(),
+            kinds.join(", "),
+            fate.join(", ")
+        ));
+        return c;
+    }
+    // Images the protocol can carry must arrive as image parts with identical
+    // bytes, in order; a dropped or altered image is a proven loss.
+    let images: Vec<&String> = exp
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            Block::Image { sha256, .. } => Some(sha256),
+            _ => None,
+        })
+        .collect();
+    if !images.is_empty() {
+        for (i, want) in images.iter().enumerate() {
+            match obs.images.get(i) {
+                Some(Some(got)) if got == *want => {}
+                other => {
+                    let what = match other {
+                        None => "was dropped",
+                        Some(None) => "was replaced by a remote URL",
+                        Some(Some(_)) => "arrived with different bytes",
+                    };
+                    let f = Finding::new(
+                        FailureClass::ContentMutation,
+                        call,
+                        seq,
+                        attempt,
+                        format!(
+                            "image block {} of {} {what} ({} carries images in tool results)",
+                            i + 1,
+                            images.len(),
+                            protocol.name()
+                        ),
+                    );
+                    return ("changed", "not-applicable", Some(f)).into();
+                }
+            }
+        }
+        if obs.images.len() > images.len() {
+            let f = Finding::new(
+                FailureClass::DuplicateResult,
+                call,
+                seq,
+                attempt,
+                format!("{} image parts for {} image block(s)", obs.images.len(), images.len()),
+            );
+            return ("changed", "not-applicable", Some(f)).into();
+        }
+    }
+    if e == a {
+        return ("identical", same, None).into();
+    }
+    if representable && texts.len() > 1 {
+        for sep in mcp_content::TEXT_JOINS.iter().filter(|s| !s.is_empty()) {
+            if a == texts.join(sep).as_bytes() {
+                let mut c: Compared = ("identical", same, None).into();
+                c.note = Some(format!("{} text blocks joined with {sep:?}", texts.len()));
+                return c;
+            }
+        }
+        // Lossless re-encoding: a JSON array whose strings are exactly the blocks.
+        let as_array = std::str::from_utf8(a)
+            .ok()
+            .filter(|s| json::duplicate_key(s).is_none())
+            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok());
+        if as_array.is_some_and(|v| v.len() == texts.len() && v.iter().zip(&texts).all(|(x, y)| x == y)) {
+            let mut c: Compared = ("changed", same, None).into();
+            c.note =
+                Some(format!("{} text blocks sent as a JSON array of strings (lossless re-encoding)", texts.len()));
+            return c;
+        }
+    }
+    // Error results: runtimes commonly add their own guidance around a tool
+    // error. The exact error content must be there; extra wording is allowed
+    // (and reported) for errors only, never for successful results.
+    if exp.is_error && !e.is_empty() {
+        if content::contains_intact(a, e) {
+            let mut c: Compared = ("changed", same, None).into();
+            c.note = Some("error content delivered verbatim inside runtime wording".into());
+            return c;
+        }
+        if let (Some(structured), Ok(text)) = (&exp.structured, std::str::from_utf8(a)) {
+            let mut values = serde_json::Deserializer::from_str(text.trim_start()).into_iter::<Value>();
+            if let Some(Ok(first)) = values.next() {
+                let consumed = &text.trim_start()[..values.byte_offset()];
+                if json::duplicate_key(consumed).is_none() && json::first_diff(structured, &first).is_none() {
+                    let mut c: Compared = ("changed", "identical", None).into();
+                    c.note = Some(
+                        "error sent as its structuredContent (JSON semantics identical) followed by runtime wording"
+                            .into(),
+                    );
+                    return c;
+                }
+            }
+        }
+    }
+    if let Some(structured) = &exp.structured {
+        let parsed = std::str::from_utf8(a)
+            .ok()
+            .filter(|s| json::duplicate_key(s).is_none())
+            .and_then(|s| serde_json::from_str::<Value>(s).ok());
+        match parsed.as_ref().map(|p| json::first_diff(structured, p)) {
+            Some(None) => {
+                let mut c: Compared = ("changed", "identical", None).into();
+                c.note = Some(
+                    "runtime sent structuredContent instead of the text content (JSON semantics identical)".into(),
+                );
+                return c;
+            }
+            // The text block is not JSON, so JSON here can only be the structured
+            // value: compare it as such and report the first changed path.
+            Some(Some(d))
+                if std::str::from_utf8(e).ok().and_then(|t| serde_json::from_str::<Value>(t).ok()).is_none() =>
+            {
+                let mut f = Finding::new(
+                    FailureClass::StructuralMutation,
+                    call,
+                    seq,
+                    attempt,
+                    format!(
+                        "structuredContent sent as JSON, but changed at {} ({}): expected {}, got {}",
+                        d.path, d.kind, d.expected, d.actual
+                    ),
+                );
+                f.json_difference = Some(d);
+                return ("changed", "changed", Some(f)).into();
+            }
+            _ => {}
+        }
+    }
+
     // Exact content of another call under this ID: association error, not a mutation.
     if let Some((other, _)) = expected.iter().find(|(id, o)| id.as_str() != call && o.extracted_content == a) {
         let mut f = Finding::new(
@@ -631,7 +915,7 @@ fn compare_occurrence(
         );
         f.provider_tool_call_id = Some(call.to_owned());
         f.content_matches_call = Some(other.clone());
-        return ("changed", if is_json { "changed" } else { "not-applicable" }, Some(f));
+        return ("changed", if is_json { "changed" } else { "not-applicable" }, Some(f)).into();
     }
     let text_diff = classify_text(e, a);
     let missing = payload::missing_sentinels(call, e, a);
@@ -656,11 +940,11 @@ fn compare_occurrence(
                 actual: "(key repeated)".into(),
             });
             f.text_difference = text_diff;
-            return ("changed", "changed", Some(f));
+            return ("changed", "changed", Some(f)).into();
         }
         match actual_text.and_then(|s| serde_json::from_str::<Value>(s).ok()) {
             Some(actual) => match exp_json.and_then(|j| json::first_diff(j, &actual)) {
-                None if exp_json.is_some() => return ("changed", "identical", None),
+                None if exp_json.is_some() => return ("changed", "identical", None).into(),
                 None => {}
                 Some(d) => {
                     let mut f = Finding::new(
@@ -675,7 +959,7 @@ fn compare_occurrence(
                     );
                     f.json_difference = Some(d);
                     f.text_difference = text_diff;
-                    return ("changed", "changed", Some(f));
+                    return ("changed", "changed", Some(f)).into();
                 }
             },
             None => {
@@ -690,11 +974,11 @@ fn compare_occurrence(
                     ),
                 );
                 f.text_difference = text_diff;
-                return ("changed", "invalid-json", Some(f));
+                return ("changed", "invalid-json", Some(f)).into();
             }
         }
     }
-    let Some(mut d) = text_diff else { return ("identical", "not-applicable", None) };
+    let Some(mut d) = text_diff else { return ("identical", "not-applicable", None).into() };
     if !body_valid_utf8 {
         d.class = FailureClass::InvalidUtf8;
         d.label.push_str("; provider request body was not valid UTF-8");
@@ -711,5 +995,5 @@ fn compare_occurrence(
     );
     f.missing_sentinels = missing;
     f.text_difference = Some(d);
-    ("changed", if is_json { "changed" } else { "not-applicable" }, Some(f))
+    ("changed", if is_json { "changed" } else { "not-applicable" }, Some(f)).into()
 }

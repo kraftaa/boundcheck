@@ -18,6 +18,23 @@ No real model is called. Runtime tracing is not used as ground truth, and no LLM
 
 > **Intended use.** Use boundarycheck on controlled test agents in a test environment. It starts the command you give it, with environment variables that point the runtime at local fake endpoints.
 
+## Installation
+
+From source (Rust 1.80 or later; boundarycheck is not on crates.io):
+
+```bash
+cargo install --git https://github.com/kraftaa/boundcheck --locked boundarycheck
+```
+
+Prebuilt binaries for Linux (x86_64, aarch64) and macOS (Apple silicon, Intel) are attached to each [GitHub release](https://github.com/kraftaa/boundcheck/releases), together with `SHA256SUMS` and a build-provenance attestation. To verify a download:
+
+```bash
+shasum -a 256 -c SHA256SUMS --ignore-missing
+gh attestation verify boundarycheck-v0.1.0-aarch64-apple-darwin.tar.gz --repo kraftaa/boundcheck
+```
+
+Releases are built by `.github/workflows/release.yml` when a `v*` tag matching the `Cargo.toml` version is pushed. Vulnerabilities: see [SECURITY.md](SECURITY.md).
+
 ## Quick start
 
 ```bash
@@ -70,8 +87,13 @@ boundarycheck list-adapters
 | `--timeout <seconds>` | Per-scenario timeout, including startup. Default 60. |
 | `--scenario <name>` | Run only this scenario. Repeatable. By default every scenario supported by the selected adapter runs. Also accepts `large-text:<bytes>` for any size from 1,024 bytes to 8 MiB, with an optional `k` (KiB) or `m` (MiB) suffix, for example `large-text:65537` or `large-text:2m`. |
 | `--extended` | Also run the extended sizes: 65,535 / 65,536 / 65,537 bytes, 250 KiB, 1 MiB − 1 / 1 MiB / 1 MiB + 1, and 5 MiB. Cannot be combined with `--scenario`. |
+| `--probes` | Also run the probe scenarios: images, audio and resources, which the provider protocol cannot carry in a tool result. Their best verdict is UNKNOWN, and the report says what the runtime did with each block. Cannot be combined with `--scenario`. |
 | `--keep-workdir` | Keep the temporary work directory and print its path. |
 | `--save-headers` | Save provider request headers with the artifacts. Credentials are always redacted. |
+| `--isolation docker` | Run boundarycheck and the runtime inside a locked-down container (see [Isolation](#isolation)). Needs `--image`. |
+| `--image <image>` | Container image for `--isolation docker`. It must contain the runtime and its dependencies. |
+| `--isolation-binary <path>` | A Linux build of boundarycheck to run inside the container. Defaults to the running executable, which only works on Linux; on macOS, build one with `scripts/build-linux-binary.sh`. |
+| `--container-engine <cli>` | `docker` (default), `podman`, `nerdctl`, ... |
 
 boundarycheck runs the agent command directly, without a shell. Ports are allocated dynamically on `127.0.0.1` and are never exposed as flags. Each scenario starts a fresh runtime process; `persistence-resume` deliberately starts a second process from persisted state.
 
@@ -84,9 +106,18 @@ boundarycheck runs the agent command directly, without a shell. Ports are alloca
 | 2 | Harness, adapter or configuration error, for example an unknown adapter, a command that cannot be launched, or a provider that cannot bind. Also returned on Ctrl-C. |
 | 3 | No failures, but at least one scenario was unknown. |
 
-## Provider protocol (V1): OpenAI Chat Completions
+## Provider protocols
 
-V1 implements exactly one protocol: **OpenAI Chat Completions**. Other protocols, including the Responses API, are not supported. An adapter that declares any other `provider_protocol` is rejected with exit code 2.
+boundarycheck implements two provider protocols. An adapter declares one with `provider_protocol`, and any other value is rejected with exit code 2.
+
+| `provider_protocol` | Endpoint | Tool results can carry |
+|---|---|---|
+| `openai-chat-completions` | `POST {base}/chat/completions` | text |
+| `openai-responses` | `POST {base}/responses` | text and images |
+
+Each protocol has its own request parser and response builders (`src/provider/protocol.rs`, `src/provider/responses.rs`). Both map requests onto one protocol-neutral model, so the comparison engine is shared. The Chat Completions details come first below; the [Responses API](#openai-responses-api) follows.
+
+### OpenAI Chat Completions
 
 **Endpoint.** The provider base URL given to the runtime is `http://127.0.0.1:<port>/<run_id>/<scenario_id>/v1`. Supported endpoints:
 
@@ -115,9 +146,26 @@ Any other path gets HTTP 404 and makes the scenario UNKNOWN. A request for a dif
 
 Replay-capable adapters also understand two deterministic control responses. `BOUNDARYCHECK_REPLAY_REQUIRED` asks for the completed history again in the same process. `BOUNDARYCHECK_CHECKPOINT_AND_EXIT` asks the runtime to persist that history and exit; the harness then launches the adapter's `resume` process.
 
-**Retry scenario.** The first tool-result request gets HTTP 429 with `retry-after-ms: 50` and `retry-after: 1` headers and an `error.type` of `rate_limit_error`.
+**Retry scenario.** The first tool-result request gets HTTP 429 with `retry-after-ms: 50` and `retry-after: 1` headers and an `error.type` of `rate_limit_error`. The other transport faults are described in [Transport faults](#transport-faults).
 
 **Error status.** Chat Completions tool messages have no error flag. An MCP `isError: true` result can therefore only be checked by its content. The report shows `error_status: "not-representable"`.
+
+### OpenAI Responses API
+
+**Supported request shape.** `input` is a string, or an array of items:
+
+- messages: `{"role", "content"}`, with or without `"type": "message"`. `content` is a string or a list of `input_text`/`output_text` and `input_image` parts.
+- `{"type": "function_call", "call_id", "name", "arguments"}`, the runtime's echo of a call.
+- `{"type": "function_call_output", "call_id", "output"}`. `output` is a string or a list of `input_text`, `input_image` and `input_file` items. Text items are concatenated in order. An `input_image` with a `data:` URL is compared by the SHA-256 of its decoded bytes.
+- other item types, such as `reasoning`, are kept as opaque entries.
+
+Tools are read from `tools[]` entries with `"type": "function"` and a `name`. `model`, `stream` and `parallel_tool_calls` are read.
+
+**`previous_response_id`.** The fake provider stores the conversation of every response it sends: the input items followed by its output items. A request that names a `previous_response_id` is evaluated as the stored conversation followed by its own `input`, which is exactly what the model would see. So a runtime that relies on server-side history is checked as strictly as one that resends everything. An unknown `previous_response_id` gets HTTP 400 and the scenario becomes UNKNOWN.
+
+**Responses.** Responses are deterministic `response` objects (`resp_boundarycheck_NNNNNN`) with `function_call` or `message` output items. When `stream` is true, the stream is the event sequence `response.created`, `response.in_progress`, `response.output_item.added`, then `response.function_call_arguments.delta`/`.done` or `response.content_part.added`/`response.output_text.delta`/`.done`/`response.content_part.done`, then `response.output_item.done` and `response.completed`, with `sequence_number`s. The 429 retry and the replay control answers work as for Chat Completions.
+
+**Error status.** As in Chat Completions, a `function_call_output` has no error flag, so only error content is checked.
 
 ## MCP server
 
@@ -140,10 +188,24 @@ Replay-capable adapters also understand two deterministic control responses. `BO
 | `sequential-history` | Two calls in consecutive turns. Every later request must still contain each earlier result exactly once and unchanged. |
 | `structured-json` | Nested JSON with `9007199254740993`, `12345678901234567890`, `19.990`, `1e-7`, `-0.0`, unicode keys and deep nesting. Compared semantically. |
 | `retry-429` | The result request gets HTTP 429 once. The retried request must carry the same result. |
+| `retry-500` / `retry-503` | The same with HTTP 500 / 503. |
+| `retry-repeated` | HTTP 429 twice in a row; every retry must carry the same result. |
+| `disconnect-after-request` | The provider reads the whole result request, then closes the connection without answering. |
+| `connection-reset` | The provider reads the whole result request, then resets the TCP connection (RST). |
+| `truncated-response` | The response to the result request is cut off halfway (JSON body or SSE stream). |
+| `slow-response` | The response arrives after 3 seconds; there must be no duplicate or changed result. |
 | `mcp-error` | An `isError: true` result. Its content must arrive unchanged. |
 | `unicode-boundaries` | NFC/NFD pairs, stacked and leading combining marks, ZWJ emoji, flags, VS16, RTL, Devanagari, Hangul jamo, astral characters, a BOM, ZWNJ, fullwidth characters and ligatures. Byte-exact. |
 | `replay-history` | The completed tool-result history is submitted a second time by the same process and must remain unchanged. Requires adapter capability `history-replay`. |
 | `persistence-resume` | The runtime persists its completed history, exits, and a new process reloads and submits it. Requires adapter capability `persistence-resume`. |
+| `multi-text-blocks` | Three MCP text blocks. They must arrive unchanged and in order (see [MCP content](#mcp-content)). |
+| `structured-content` | A text summary plus `structuredContent`. Either one must arrive unchanged. |
+| `error-with-metadata` | An `isError` result with `structuredContent` and `_meta`. The error text must arrive unchanged. |
+| `mcp-protocol-error` | A JSON-RPC error instead of a result. Its exact message must reach the provider. |
+| `mixed-content` *(probe)* | Text, a PNG image, text. |
+| `embedded-resource` *(probe)* | Text plus an embedded text resource and an embedded blob resource. |
+| `resource-link` *(probe)* | Text plus a `resource_link`. |
+| `audio-content` *(probe)* | Text plus an audio block. |
 
 The identifiers are deterministic:
 
@@ -162,6 +224,33 @@ WAIT_TOOL_RESULT --(replay scenario)--> WAIT_REPLAYED_HISTORY | WAIT_RESUMED_HIS
 COMPLETE
 anything unexpected --> ABORTED  (the scenario becomes UNKNOWN, never a guessed FAIL)
 ```
+
+## Transport faults
+
+The fake provider injects deterministic failures on the first request(s) that carry tool results. The request is always read and recorded in full first, so its content is checked like any other.
+
+| Fault | On the wire |
+|---|---|
+| HTTP status (`retry-429`, `retry-500`, `retry-503`, `retry-repeated`) | An error JSON body with `retry-after-ms: 50` and `retry-after: 1`. |
+| `disconnect-after-request` | The socket is closed without a response. |
+| `connection-reset` | `SO_LINGER` 0, then close: the client receives a TCP RST. |
+| `truncated-response` | The full `content-length` header, then only half of the body (a final answer as JSON or as an SSE stream), then close. |
+| `slow-response` | A normal answer after 3 seconds. |
+
+If the runtime retries, every retried request must carry the unchanged results. A change on the retry is `RetryMutation`, and the finding's `underlying_class` gives the cause. If the runtime gives up and exits, the scenario is UNKNOWN (`runtime-exited-early`), because no transfer fault is proven. These faults need byte-level control of the connection, so the fake provider uses its own small HTTP/1.1 server (`src/provider/server.rs`). It handles keep-alive, `Content-Length` and `chunked` request bodies, and `Expect: 100-continue`.
+
+## MCP content
+
+An MCP result is an ordered list of blocks (`text`, `image`, `audio`, `resource_link`, `resource`), plus optional `structuredContent`, `_meta` and `isError`. Instead of a result, the server can also answer with a JSON-RPC error. A provider protocol may be unable to carry some block types in a tool result. The rules below separate a faithful translation from a lossy one; a required transformation is never reported as corruption.
+
+| MCP content | A faithful copy | Otherwise |
+|---|---|---|
+| One or more text blocks | The blocks, in order and byte-identical: one text part per block, or one string with the blocks joined by `""`, `"\n"` or `"\n\n"`. A non-empty separator is reported as a note. | FAIL with the usual classification (truncation, mutation, ...). |
+| `structuredContent` | Either the text blocks (above) or the structured value as JSON, compared semantically and without duplicate keys. The choice is reported as a note. | `StructuralMutation` with the first changed JSON path, if the runtime sent JSON. |
+| JSON-RPC error | Text that contains the exact error message, alone or inside the runtime's own wording. | `ContentMutation`: the message never reached the provider. |
+| `image`, `audio`, `resource_link`, `resource` | Not representable in a Chat Completions tool result. | UNKNOWN (`unrepresentable-content`) if every text block still arrived unchanged and in order. The detail says, for each block, whether it was *carried inside the tool content*, *carried elsewhere in the request*, or *dropped*. FAIL if a text block was lost or changed. |
+
+The protocol-neutral model is `src/model/content.rs`. `Representable` declares which block types a provider protocol can carry. It is the extension point for protocols with richer tool results, such as the Responses API, where images are representable and the image scenarios become normal PASS/FAIL scenarios.
 
 ## How results are compared
 
@@ -220,8 +309,33 @@ The human output reports the most specific proven fact. All findings are in the 
 | `unexpected-transition` | A request arrived after completion, or a conversation restarted without the issued calls. |
 | `tool-arguments-changed` | The arguments that reached MCP differ from the ones the provider issued. |
 | `evidence-inconsistent` | The MCP evidence log does not match the deterministic payload generator (tampered or corrupted evidence). |
+| `unrepresentable-content` | The MCP result contains blocks the provider protocol cannot carry in a tool result; the text blocks arrived unchanged. |
 
 A proven failure takes precedence over an unknown in the same scenario.
+
+## Isolation
+
+`--isolation docker` re-runs boundarycheck itself inside a container. The fake provider, the MCP server and the runtime all run there and talk over the container's own loopback, so the container gets **no network at all**.
+
+| | Inside the container |
+|---|---|
+| Network | `--network none`: no internet, no DNS, no access to host services. The runtime cannot reach real model APIs or send data anywhere. |
+| Files | Only the current directory, mounted **read-only** at `/work`, plus the `--report` and `--artifacts` directories (read-write). Your home directory, SSH keys and cloud credentials are not visible. |
+| Filesystem | `--read-only` root and a writable in-memory `/tmp` (the work directory). |
+| Privileges | `--cap-drop ALL`, `no-new-privileges`, `--pids-limit 512`, running as your UID so output files belong to you. |
+| Environment | Only what the adapter sets, plus `HOME=/tmp`. Your shell's variables are not passed in. |
+
+```bash
+scripts/build-linux-binary.sh            # macOS only: a Linux build of boundarycheck
+docker build -t boundarycheck-openai-agents -f adapters/openai-agents-python/Dockerfile .
+boundarycheck run --adapter openai-agents-python --isolation docker \
+  --image boundarycheck-openai-agents --isolation-binary target/linux-arm64/release/boundarycheck \
+  --report out/report.json -- python3 adapters/openai-agents-python/agent.py
+```
+
+The image must contain everything the runtime needs, because nothing can be downloaded at run time. `adapters/openai-agents-python/Dockerfile` installs the Agents SDK from the hash-locked requirements. Paths in the agent command are relative to the current directory (`/work` inside). An adapter manifest given as a path must be inside the current directory. The report records `isolation: "docker image=... network=none"`.
+
+Isolation protects **your machine** from the runtime under test. It does not make the test tamper-proof: the runtime still runs next to the harness inside the container (see [SECURITY.md](SECURITY.md)). The CI `isolation` job checks the guarantees end to end: a probe "agent" inside the container finds no network, no host home directory and no inherited secret.
 
 ## Runtime adapters
 
@@ -286,16 +400,24 @@ An adapter is a JSON manifest that tells the harness how to configure, start, dr
 Built-in adapters:
 
 - `fixture-agent`: the stdlib-only Python fixtures in `fixtures/`.
+- `fixture-agent-responses`: the same fixtures speaking the Responses API. The conforming fixture's `--previous-response-id` flag sends only new items after the first response.
+- `openai-agents-python-responses`: the Agents SDK with `OpenAIResponsesModel` (the shim's `--responses` flag).
 - `openai-agents-python`: the OpenAI Agents SDK through `adapters/openai-agents-python/agent.py`. This shim only wires `OpenAIChatCompletionsModel`, `MCPServerStdio`, and the SDK's native [`SQLiteSession`](https://openai.github.io/openai-agents-python/sessions/) to the fake boundaries. The SDK handles tool results and persisted history itself. Pass `--stream` to the shim to use `Runner.run_streamed`.
 
-## Real runtime result
+## Real runtime results
+
+Three runtimes are tested, each over both protocols and with and without streaming: the OpenAI Agents SDK, Pydantic AI and LangGraph (with `langchain-mcp-adapters`). The full, generated table with an explanation for every non-PASS result is in **[docs/compatibility.md](docs/compatibility.md)**. Regenerate it, and the baselines CI checks against, with `scripts/compat_matrix.py --write-baselines`.
+
+### OpenAI Agents SDK in detail
 
 | | |
 |---|---|
 | Runtime | `openai-agents` **0.23.1**, with `openai` 3.26.0 and `mcp` 2.3.0 (pinned in `adapters/openai-agents-python/requirements.txt`; the full dependency set is hash-locked in `requirements.lock`) |
 | Python | 3.13.5 |
 | OS | macOS 26.7 (Darwin 25.6.0, arm64) |
-| Result | 12/12 PASS, both non-streaming and streaming (`--stream`) |
+| Chat Completions | 15/16 PASS and 1 FAIL on the default suite; the 8 extended sizes PASS; the 4 probes are UNKNOWN. Identical in non-streaming and streaming (`--stream`) mode. Baseline: `expected.json`. |
+| Responses API | Same default-suite and extended results; of the probes, `mixed-content` PASSes (the image arrives as an `input_image` with identical bytes), and the other 3 are UNKNOWN. Identical with `--stream`. Baseline: `expected-responses.json`. |
+| Baselines | In `adapters/openai-agents-python/`. CI compares every run with them via `scripts/check_expected.py`, so a change in either direction is noticed. |
 
 Observed behavior:
 
@@ -303,21 +425,27 @@ Observed behavior:
 - The SDK retried the HTTP 429 with the identical result.
 - Two MCP calls were simultaneously in flight and completed B then A without losing their call-ID association.
 - `SQLiteSession` preserved the tool result through both same-process replay and a real process exit/restart.
+- Several text blocks are sent as one text part per block; `structuredContent` is not used by default (`use_structured_content=False`), so the text summary is sent.
+- Transport faults: HTTP 429/500/503 (including two 429s in a row), a closed connection, a TCP reset and a slow response are retried with unchanged results, in both protocols and both modes. A response body cut off halfway is retried in non-streaming mode. **In streaming mode it is not:** the `openai` client raises `APIConnectionError: Connection error.` while reading the stream, and its automatic retries only cover a request that fails before the response starts, so the run ends. `truncated-response` is therefore UNKNOWN with `--stream`, and recorded that way in both baselines.
+- **`mcp-protocol-error` FAILs because of a documented SDK default, not a defect.** When the MCP server answers with a JSON-RPC error, the SDK replaces the message with `"An error occurred while running the tool. Please try again."` (`agents/tool.py`, `default_tool_error_function`, whose docstring reads: *"Return a fixed error response without exposing the exception to the model. Provide a custom `failure_error_function` to return application-approved error details."*). The adapter tests the SDK's defaults, so it does not override this. A tool-level error (`isError: true`, scenario `mcp-error`) is passed through unchanged.
+- Probes over Chat Completions: the image block is dropped from the request. Over Responses, the image is sent as an `input_image` part with identical bytes. In both, audio, `resource_link` and embedded resources are serialized as JSON inside the tool text.
 
-No framework defect was found. Every FAIL in this repository's demo and tests comes from the faulty fixture, whose faults are deliberately injected.
+Every other FAIL in this repository's demo and tests comes from the faulty fixture, whose faults are deliberately injected.
 
 ## Fixture runtimes
 
 - `fixtures/conforming-agent/agent.py` forwards results unchanged. With `--reorder`, it reverses concurrent results; this is legal and must still PASS.
 - `fixtures/faulty-agent/agent.py --fault NAME[,NAME…]` injects deliberate faults:
   - `truncate`, `truncate-64k`, `head-tail`, `head-tail-marker`, `utf8-split`
+  - (the fixture runtimes retry HTTP 429/500/502/503, closed or reset connections and truncated bodies, up to 4 attempts)
   - `replay-drop` (drops tool results from replayed history)
   - `swap`, `duplicate`, `missing`, `retry-mutation`, `replay-mutation`
   - `normalize`, `json-float`
   - `json-dup-key` (hides a different value in an earlier duplicate key)
   - `escape` (starts a `setsid()` child, then hangs)
   - `echo-user` (copies each result into an extra user message) and `extra-id` (adds a tool result under an unissued ID)
-  - `reserialize-json`, a legal change that must PASS
+  - `join-space`, `drop-block`, `structured-mutate`, `error-generic` (content-model faults)
+  - `reserialize-json`, `join-newline` and `send-structured`, legal changes that must PASS
   - `exit-early` and `hang`, which must give UNKNOWN
 
 ## Reports and evidence
@@ -362,8 +490,23 @@ DIR/BC_RUN_000001/
 ## Testing
 
 ```bash
-cargo test     # 38 unit tests + 16 end-to-end tests + 3 property tests (requires python3)
+cargo test     # 48 unit + 22 end-to-end + 14 property tests (requires python3; the Docker isolation test runs only when BOUNDARYCHECK_DOCKER_IMAGE is set)
 ```
+
+**False-PASS properties** (`tests/false_pass.rs`, run by `cargo test`). A simulated runtime drives the real provider state machine and the real MCP server. On every run it applies a random transformation to the tool results, either when they are first delivered, on the 429 retry, or in the replayed history:
+
+- **Legal** transformations must PASS: splitting content into text parts, `\uXXXX` escaping, reordering, and pretty-printing JSON.
+- **Illegal** ones must never PASS: truncation, appended or replaced characters, dropping, duplication, swapped or changed IDs, a missing ID, NFC normalization, empty or `null` content, copying into a user message, and an extra result under an unissued ID.
+
+An oracle written independently of `compare/` checks every PASS. Other properties check that the classifier reports "no difference" exactly when the bytes are equal, that JSON equality is symmetric and agrees with the canonical form, that number comparison is exact (including exponents beyond `i128`), that duplicate keys are always found, and that the parsers never panic. The suite was mutation-tested: disabling one evaluator check makes it report a false PASS with a minimal reproduction.
+
+**Fuzzing** (`fuzz/`, nightly Rust and `cargo-fuzz`) has five targets: `provider_request` (raw request bodies through both protocol parsers, the state machine and the evaluator), `http_request` (raw bytes on the fake provider's socket: request line, headers, `Content-Length` and chunked bodies, pipelining), `mcp_server` (arbitrary stdin; every output line must be JSON-RPC), `classify_text` and `json_compare`.
+
+```bash
+cd fuzz && cargo +nightly fuzz run provider_request -- -max_total_time=300
+```
+
+Runs so far found no crash or failed check: 90 seconds per target (about 7.2 million inputs), then 2 minutes each for the extended `provider_request` (713,000 inputs) and the new `http_request` (1.6 million inputs). `.github/workflows/fuzz.yml` runs all five weekly and on demand, and keeps any crash reproducer as an artifact.
 
 The unit tests cover:
 
@@ -405,11 +548,11 @@ The integration tests launch the real binary, the provider, the MCP server and t
 
 ## Known limitations
 
-- Only OpenAI Chat Completions is supported: no Responses API and no other providers.
+- Two provider protocols are supported: OpenAI Chat Completions and the OpenAI Responses API. Other providers are not. For Responses, only the function-calling surface above is implemented: no hosted tools, background mode or Conversations API.
 - Only MCP over stdio is supported.
-- Only text tool results are covered: no image or resource content.
+- Images, audio and resources cannot be carried in a Chat Completions tool result, so those scenarios are opt-in probes whose best verdict is UNKNOWN.
 - Error status is not observable with Chat Completions, so only error content is checked.
-- The runtime is assumed not to be adversarial. It runs as the same OS user and launches the MCP server itself, so no file, socket or secret can be kept out of its reach. boundarycheck cross-checks the evidence log against its payload generator, which catches corrupted or edited evidence; it cannot stop a runtime written to fool the test. Testing hostile code needs OS-level isolation (a separate user or sandbox), which is outside this tool.
+- The runtime is assumed not to be adversarial. It runs as the same OS user and launches the MCP server itself, so no file, socket or secret can be kept out of its reach. boundarycheck cross-checks the evidence log against its payload generator, which catches corrupted or edited evidence; it cannot stop a runtime written to fool the test. `--isolation docker` keeps such a runtime away from your files, credentials and network, but not away from the harness itself.
 - Replay and persistence/resume require explicit adapter capabilities because runtimes expose different lifecycle APIs. Unsupported lifecycle scenarios are omitted by default and rejected if selected explicitly.
 - One runtime process is started per scenario. Runtimes with expensive startup make a run slower.
 - On macOS, a process that leaves the runtime's process group *and* is orphaned because its parent already exited is reparented to launchd and cannot be found. While its parent is alive it is found and killed, as it always is on Linux, where boundarycheck is a child subreaper. Output capture never waits more than 2 seconds for such a process.

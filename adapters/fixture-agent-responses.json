@@ -1,0 +1,38 @@
+{
+  "name": "fixture-agent-responses",
+  "description": "Stdlib-only Python fixture runtimes in fixtures/, speaking the OpenAI Responses API.",
+  "provider_protocol": "openai-responses",
+  "capabilities": [
+    "history-replay",
+    "persistence-resume"
+  ],
+  "environment": {
+    "OPENAI_BASE_URL": "{{provider_base_url}}",
+    "OPENAI_API_KEY": "boundarycheck-test-key",
+    "BOUNDARYCHECK_MCP_COMMAND": "{{mcp_command}}",
+    "BOUNDARYCHECK_MCP_ARGS": "{{mcp_args_json}}",
+    "BOUNDARYCHECK_PROMPT": "{{scenario_prompt}}",
+    "BOUNDARYCHECK_RUNTIME_INFO": "{{runtime_info_path}}",
+    "BOUNDARYCHECK_STATE_PATH": "{{workdir}}/runtime-state.json",
+    "BOUNDARYCHECK_PROVIDER_PROTOCOL": "openai-responses"
+  },
+  "resume": {
+    "environment": {
+      "BOUNDARYCHECK_RESUME": "1"
+    }
+  },
+  "readiness": {
+    "type": "provider-request",
+    "timeout_seconds": 20
+  },
+  "completion": {
+    "type": "provider-scenario-complete",
+    "exit_grace_seconds": 5
+  },
+  "shutdown": {
+    "grace_seconds": 2
+  },
+  "runtime_version": {
+    "type": "report-file"
+  }
+}
