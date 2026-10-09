@@ -1,8 +1,12 @@
-# boundarycheck
+# BoundaryCheck
 
-`boundarycheck` is a deterministic CLI test harness for agent runtimes. It answers:
+BoundaryCheck shows whether an AI agent framework passes tool results to the AI model correctly and safely.
 
-> A tool produced X. What did the runtime actually send to the model provider?
+Use it when building or evaluating an agent runtime. It catches tool output that was changed, lost, duplicated, truncated, or attached to the wrong call—before that bug reaches production.
+
+It answers one question:
+
+> A tool produced X. What did the runtime actually send to the model?
 
 It records both sides of the runtime independently and compares them without calling a real model:
 
