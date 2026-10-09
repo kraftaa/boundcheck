@@ -103,7 +103,8 @@ Protections include:
 - credential-name and common-token redaction;
 - opt-in request headers with sensitive values redacted;
 - owner-only artifact and report permissions;
-- `O_NOFOLLOW` for evidence and report files;
+- component-by-component `openat`/`O_NOFOLLOW` checks for evidence, report, and artifact paths;
+- runtime stdout/stderr excluded from reports and artifacts unless explicitly requested;
 - bounded requests, artifacts, and captured output;
 - process-group and descendant cleanup on timeout or interruption;
 - evidence cross-checking against the deterministic payload generator.
@@ -111,6 +112,15 @@ Protections include:
 `--isolation docker` additionally removes network access, mounts the project read-only, uses a read-only root filesystem and in-memory temporary directory, drops Linux capabilities, limits processes, and exposes only output directories as writable.
 
 The runtime executes as the same operating-system user and launches the MCP server itself. A runtime deliberately written to fool or attack the harness therefore needs OS-level isolation, such as a sandbox or separate user. That isolation is outside boundarycheck's scope.
+
+## MCP content policy
+
+boundarycheck compares the ordered MCP content blocks emitted by the tool with
+the provider-visible function result. Exact text and JSON semantics must be
+preserved. Legal, lossless protocol encodings are reported as notes; proven
+loss, mutation, duplication, or incorrect call association is `FAIL`. When a
+provider protocol cannot represent a block, the verdict is `UNKNOWN` rather
+than a false pass or failure.
 
 ## Known limitations
 

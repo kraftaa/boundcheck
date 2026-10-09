@@ -528,6 +528,37 @@ fn artifacts_are_deterministic_private_and_redacted() {
 }
 
 #[test]
+fn runtime_logs_are_opt_in_because_they_may_contain_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("logs.py");
+    let marker = "BC_TEST_SECRET_MARKER_123456789";
+    std::fs::write(&agent, format!("import sys\nprint({marker:?}, file=sys.stderr)\nsys.exit(1)\n")).unwrap();
+
+    let without_artifacts = dir.path().join("without");
+    let without = boundarycheck(
+        &["--scenario", "exact-text", "--artifacts", without_artifacts.to_str().unwrap()],
+        &["python3", agent.to_str().unwrap()],
+    );
+    assert_eq!(without.code, 3);
+    assert!(without.report["scenarios"][0]["process"].get("stderr_tail").is_none());
+    assert!(without.report.get("workdir").is_none());
+    assert!(!without.report.to_string().contains(marker));
+    assert!(!without_artifacts.join("BC_RUN_000001/exact-text/runtime-stderr.log").exists());
+
+    let with_artifacts = dir.path().join("with");
+    let with = boundarycheck(
+        &["--scenario", "exact-text", "--artifacts", with_artifacts.to_str().unwrap(), "--include-runtime-logs"],
+        &["python3", agent.to_str().unwrap()],
+    );
+    assert_eq!(with.code, 3);
+    assert_eq!(with.report["scenarios"][0]["process"]["stderr_tail"], marker);
+    assert_eq!(
+        std::fs::read_to_string(with_artifacts.join("BC_RUN_000001/exact-text/runtime-stderr.log")).unwrap().trim(),
+        marker
+    );
+}
+
+#[test]
 fn null_tool_content_is_a_proven_failure() {
     // A runtime that sends `content: null` for a tool result: the content was lost.
     let dir = tempfile::tempdir().unwrap();
@@ -657,7 +688,15 @@ fn docker_isolation_runs_without_network_or_host_files() {
     let rel_probe = probe.strip_prefix(root()).unwrap().to_str().unwrap().to_owned();
     run(
         &["python3", &rel_probe],
-        &["--scenario", "exact-text", "--timeout", "15", "--artifacts", art.to_str().unwrap()],
+        &[
+            "--scenario",
+            "exact-text",
+            "--timeout",
+            "15",
+            "--artifacts",
+            art.to_str().unwrap(),
+            "--include-runtime-logs",
+        ],
     );
     let stderr = std::fs::read_to_string(art.join("BC_RUN_000001/exact-text/runtime-stderr.log")).unwrap();
     assert!(stderr.contains("PROBE net blocked"), "{stderr}");

@@ -2,7 +2,7 @@
 
 ## Installation
 
-Install from source with Rust 1.80 or later:
+Install from source with Rust 1.85 or later:
 
 ```bash
 cargo install --git https://github.com/kraftaa/boundcheck --locked boundarycheck
@@ -50,8 +50,9 @@ boundarycheck run --adapter fixture-agent \
 | `--scenario <name>` | Run one scenario; repeatable. |
 | `--extended` | Add boundary sizes around 64 KiB and 1 MiB, plus 250 KiB and 5 MiB. |
 | `--probes` | Add image, audio, resource, and resource-link probes. |
-| `--keep-workdir` | Keep and print the temporary work directory. |
+| `--keep-workdir` | Keep the temporary work directory, including unredacted runtime logs. |
 | `--save-headers` | Save redacted request headers; requires `--artifacts`. |
+| `--include-runtime-logs` | Include unredacted runtime stdout/stderr; may contain secrets. |
 | `--isolation docker` | Run the harness and runtime in a locked-down container. |
 | `--image <image>` | Container image required for Docker isolation. |
 | `--isolation-binary <path>` | Linux boundarycheck binary to use inside the container. |
@@ -121,12 +122,17 @@ DIR/BC_RUN_000001/
     tool-response-BC_CALL_000001.raw
     provider-request-002.raw
     provider-request-002.headers.json  # only with --save-headers
-    runtime-stdout.log
-    runtime-stderr.log
+    runtime-stdout.log                 # only with --include-runtime-logs
+    runtime-stderr.log                 # only with --include-runtime-logs
     comparison.json
 ```
 
-Headers are opt-in and credentials are redacted. Raw evidence is capped at 8 MiB per file; stdout and stderr are capped at 1 MiB each. Files use mode `0600`, directories use `0700`, and symlink targets are refused.
+Headers are opt-in and credentials are redacted. Runtime stdout/stderr are also
+opt-in because arbitrary runtime logs can contain secrets; they are not redacted.
+Raw evidence is capped at 8 MiB per file; stdout and stderr are capped at 1 MiB
+each. Files use mode `0600`, directories use `0700`, and symlinks in every output
+path component are refused. The report and adapter formats have published
+[JSON schemas](../schemas/).
 
 ## Docker isolation
 

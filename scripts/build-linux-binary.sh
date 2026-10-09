@@ -11,5 +11,6 @@ mkdir -p "target/linux-$arch" target/linux-cargo-registry
 docker run --rm -v "$PWD":/src -w /src \
   -v "$PWD/target/linux-cargo-registry":/usr/local/cargo/registry \
   -e CARGO_TARGET_DIR="/src/target/linux-$arch" \
-  rust:1-bookworm cargo build --release --locked
+  rust:1.85-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4 \
+  cargo build --release --locked
 echo "built target/linux-$arch/release/boundarycheck"

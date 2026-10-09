@@ -3,6 +3,7 @@
 
 use crate::adapter::{Adapter, Completion, Readiness, RuntimeVersion, TemplateVars};
 use crate::compare::{self, content::sha256_hex};
+use crate::fs_secure;
 use crate::model::observation::McpEvidence;
 use crate::model::verdict::{exit_classification, exit_code, UnknownNote, UnknownReason, Verdict};
 use crate::process::{self, SpawnSpec};
@@ -13,8 +14,6 @@ use crate::report::*;
 use crate::scenario::{self, ScenarioDef};
 use base64::Engine;
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -30,6 +29,7 @@ pub struct RunConfig {
     pub artifacts_all: bool,
     pub keep_workdir: bool,
     pub save_headers: bool,
+    pub include_runtime_logs: bool,
     pub on_scenario: Box<dyn Fn(&ScenarioReport)>,
 }
 
@@ -71,8 +71,10 @@ pub fn run(cfg: RunConfig) -> RunReport {
     report.exit = ExitSummary { code, classification: exit_classification(code) };
     report.duration_ms = started.elapsed().as_millis();
     if let Some(dir) = &report.artifacts {
-        let _ =
-            write_private(&Path::new(dir).join("run.json"), &serde_json::to_vec_pretty(&report).unwrap_or_default());
+        let _ = fs_secure::write_private(
+            &Path::new(dir).join("run.json"),
+            &serde_json::to_vec_pretty(&report).unwrap_or_default(),
+        );
     }
     report
 }
@@ -82,7 +84,7 @@ fn run_inner(cfg: &RunConfig, run_id: &str, report: &mut RunReport) -> Result<()
         .prefix("boundarycheck-")
         .tempdir()
         .map_err(|e| format!("cannot create work directory: {e}"))?;
-    let keep = cfg.keep_workdir || cfg.artifacts.is_some();
+    let keep = cfg.keep_workdir;
     let workdir = tmp.path().to_path_buf();
     if keep {
         report.workdir = Some(workdir.display().to_string());
@@ -130,6 +132,9 @@ fn version_source(v: &RuntimeVersion) -> String {
 /// created atomically (`mkdir` fails if it exists), so concurrent runs never share one.
 fn allocate_run_id(artifacts: Option<&Path>) -> String {
     let Some(dir) = artifacts else { return scenario::format_run_id(1) };
+    if fs_secure::create_dir_all(dir).is_err() {
+        return scenario::format_run_id(1);
+    }
     let mut n = fs::read_dir(dir)
         .map(|entries| {
             entries
@@ -139,12 +144,9 @@ fn allocate_run_id(artifacts: Option<&Path>) -> String {
                 .map_or(1, |k| k + 1)
         })
         .unwrap_or(1);
-    if mkdir_private(dir).is_err() {
-        return scenario::format_run_id(n);
-    }
     loop {
         let id = scenario::format_run_id(n);
-        match fs::DirBuilder::new().mode(0o700).create(dir.join(&id)) {
+        match fs_secure::create_dir_exclusive(&dir.join(&id)) {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < u32::MAX => n += 1,
             _ => return id,
         }
@@ -162,9 +164,9 @@ fn run_scenario(
     runtime: &mut RuntimeInfo,
 ) -> Result<ScenarioReport, String> {
     let dir = workdir.join(def.id);
-    mkdir_private(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    fs_secure::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let evidence = dir.join("mcp-evidence.jsonl");
-    write_private(&evidence, b"").map_err(|e| format!("cannot create MCP evidence file: {e}"))?;
+    fs_secure::write_private(&evidence, b"").map_err(|e| format!("cannot create MCP evidence file: {e}"))?;
     let runtime_info = dir.join("runtime-info.json");
     let (stdout_path, stderr_path) = (dir.join("runtime-stdout.log"), dir.join("runtime-stderr.log"));
     let provider = Provider::start(run_id, def, cfg.adapter.protocol(), cfg.save_headers)?;
@@ -191,7 +193,7 @@ fn run_scenario(
     let a = &cfg.adapter;
     for f in &a.files {
         let path = dir.join(crate::adapter::safe_relative_path(&vars.render(&f.path)?)?);
-        write_private(&path, vars.render(&f.content)?.as_bytes())
+        fs_secure::write_private(&path, vars.render(&f.content)?.as_bytes())
             .map_err(|e| format!("cannot write adapter file {}: {e}", path.display()))?;
     }
     let env: Vec<(String, String)> =
@@ -354,7 +356,9 @@ fn run_scenario(
         resolve_runtime(&a.runtime_version, &vars, &runtime_info, runtime);
     }
 
-    let stderr_tail = (eval.verdict == Verdict::Unknown).then(|| process::tail(&active_stderr_path, 600)).flatten();
+    let stderr_tail = (cfg.include_runtime_logs && eval.verdict == Verdict::Unknown)
+        .then(|| process::tail(&active_stderr_path, 600))
+        .flatten();
     let mut s = ScenarioReport {
         id: def.id.to_owned(),
         summary: def.summary.to_owned(),
@@ -382,7 +386,7 @@ fn run_scenario(
     if let Some(root) = artifacts_root {
         if cfg.artifacts_all || s.verdict != Verdict::Pass {
             let out = root.join(def.id);
-            write_artifacts(&out, &machine, &mcp, &dir, &mut s)
+            write_artifacts(&out, &machine, &mcp, &dir, cfg.include_runtime_logs, &mut s)
                 .map_err(|e| format!("cannot write artifacts to {}: {e}", out.display()))?;
             s.artifacts = Some(out.display().to_string());
         }
@@ -456,9 +460,10 @@ fn write_artifacts(
     machine: &ScenarioMachine,
     mcp: &[McpEvidence],
     workdir: &Path,
+    include_runtime_logs: bool,
     s: &mut ScenarioReport,
 ) -> std::io::Result<()> {
-    mkdir_private(out)?;
+    fs_secure::create_dir_all(out)?;
     // Raw MCP responses exactly as written to stdout.
     let mut counts = std::collections::HashMap::new();
     for rec in mcp.iter().filter(|r| r.event == "tool-response") {
@@ -478,47 +483,32 @@ fn write_artifacts(
         write_bounded(&out.join(&name), &r.raw)?;
         summary.artifact = Some(name);
         if let Some(h) = &r.headers {
-            write_private(
+            fs_secure::write_private(
                 &out.join(format!("provider-request-{:03}.headers.json", r.seq)),
                 &serde_json::to_vec_pretty(h)?,
             )?;
         }
     }
-    for log in ["runtime-stdout.log", "runtime-stderr.log", "runtime-resume-stdout.log", "runtime-resume-stderr.log"] {
-        if let Ok(bytes) = fs::read(workdir.join(log)) {
-            write_bounded(&out.join(log), &bytes)?;
+    if include_runtime_logs {
+        for log in
+            ["runtime-stdout.log", "runtime-stderr.log", "runtime-resume-stdout.log", "runtime-resume-stderr.log"]
+        {
+            if let Ok(bytes) = fs::read(workdir.join(log)) {
+                write_bounded(&out.join(log), &bytes)?;
+            }
         }
     }
-    write_private(&out.join("comparison.json"), &serde_json::to_vec_pretty(&*s)?)
-}
-
-fn mkdir_private(path: &Path) -> std::io::Result<()> {
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(path)
-}
-
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        mkdir_private(parent)?;
-    }
-    // O_NOFOLLOW: never write through a symlink planted in the artifacts tree.
-    let mut f = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    f.write_all(bytes)
+    fs_secure::write_private(&out.join("comparison.json"), &serde_json::to_vec_pretty(&*s)?)
 }
 
 fn write_bounded(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if bytes.len() <= MAX_ARTIFACT_BYTES {
-        return write_private(path, bytes);
+        return fs_secure::write_private(path, bytes);
     }
     let mut data = bytes[..MAX_ARTIFACT_BYTES].to_vec();
     data.extend_from_slice(
         format!("\n[boundarycheck: artifact truncated; {} of {} bytes kept]\n", MAX_ARTIFACT_BYTES, bytes.len())
             .as_bytes(),
     );
-    write_private(path, &data)
+    fs_secure::write_private(path, &data)
 }

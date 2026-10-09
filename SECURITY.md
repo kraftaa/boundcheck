@@ -4,10 +4,7 @@
 
 Please report vulnerabilities privately, not in a public issue:
 use **GitHub private vulnerability reporting** on this repository
-(*Security* tab → *Report a vulnerability*). Maintainers: enable it under
-*Settings → Code security* when the repository becomes public; until then,
-only collaborators can see the repository and should report through the
-same *Security* tab or directly to the maintainer.
+(*Security* tab → *Report a vulnerability*).
 
 Please include the boundarycheck version (`boundarycheck --version`), the
 platform, the command line, and a minimal reproduction. Do not include real
@@ -27,8 +24,8 @@ In scope (please report):
 - a way for input on the fake provider's socket, the MCP server's stdin, an
   adapter manifest, or a report/artifact path to crash boundarycheck, make it
   write outside its work or artifacts directory, or follow a planted symlink;
-- secrets reaching reports or artifacts despite redaction (headers, argv,
-  inherited environment);
+- secrets reaching reports or artifacts without an explicit unsafe opt-in
+  (headers, argv, inherited environment, or runtime logs);
 - a false PASS: boundarycheck reporting PASS although the provider-visible
   content differs from what the MCP server emitted;
 - child processes surviving a run on Linux, or on macOS while their parent

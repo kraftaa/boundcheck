@@ -1,0 +1,36 @@
+name: Bug report
+description: Report reproducible incorrect behavior (use private reporting for security issues)
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: For vulnerabilities or suspected secret exposure, stop and use the Security tab's private reporting flow.
+  - type: input
+    id: version
+    attributes:
+      label: boundarycheck version
+      placeholder: boundarycheck 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: macOS 15 arm64, Ubuntu 24.04 x86_64, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include the expected and actual behavior without credentials or private data.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      render: shell
+    validations:
+      required: true

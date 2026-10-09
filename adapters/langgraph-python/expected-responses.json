@@ -8,23 +8,28 @@
       "verdict": "PASS",
       "stream": {
         "verdict": "UNKNOWN",
+        "unknown_reasons": ["runtime-exited-early"],
         "why": "In streaming mode a cut-off SSE stream raises langchain_openai OpenAIConnectionError (Connection error.) and is not retried; non-streaming requests are retried and PASS."
       }
     },
     "mcp-protocol-error": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["runtime-exited-early"],
       "why": "langchain-mcp-adapters raises mcp McpError for a JSON-RPC error; the prebuilt ReAct agent does not catch it, so the run ends before a tool result is sent."
     },
     "embedded-resource": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["unrepresentable-content"],
       "why": "Not representable in a Responses tool output; both embedded resources are dropped (text blocks arrive unchanged)."
     },
     "resource-link": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["unrepresentable-content"],
       "why": "Not representable; the resource_link URI is carried elsewhere in the request, outside the tool output."
     },
     "audio-content": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["runtime-exited-early"],
       "why": "langchain-mcp-adapters raises NotImplementedError ('AudioContent conversion to LangChain content blocks is not yet supported') and the run ends."
     }
   }

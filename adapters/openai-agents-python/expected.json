@@ -8,6 +8,7 @@
       "verdict": "PASS",
       "stream": {
         "verdict": "UNKNOWN",
+        "unknown_reasons": ["runtime-exited-early"],
         "why": "In streaming mode the openai client raises APIConnectionError when the SSE stream is cut off and does not retry; the run ends before the result is re-sent. Non-streaming requests are retried and PASS."
       }
     },
@@ -20,18 +21,22 @@
     },
     "mixed-content": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["unrepresentable-content"],
       "why": "Chat Completions tool results cannot carry images; the SDK drops the image block."
     },
     "embedded-resource": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["unrepresentable-content"],
       "why": "Not representable; the SDK serializes resource blocks as JSON inside the tool text."
     },
     "resource-link": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["unrepresentable-content"],
       "why": "Not representable; the SDK serializes the block as JSON inside the tool text."
     },
     "audio-content": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["unrepresentable-content"],
       "why": "Not representable; the SDK serializes the block as JSON inside the tool text."
     }
   }

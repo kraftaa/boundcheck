@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-09
+
 ### Added
 - Real-runtime compatibility matrix: Pydantic AI 2.54.0 and LangGraph 1.2.14
   (langchain-openai 1.7.0, langchain-mcp-adapters 0.3.2) join the OpenAI
@@ -66,9 +68,14 @@ All notable changes to this project are documented here. The format follows
   `tiny_http`, for byte-level control of faults (one dependency fewer).
 - CI actions are pinned by commit SHA; the Agents SDK adapter dependencies
   are hash-locked and the real-runtime run is part of CI.
+- Output creation rejects symlinks in every user-controlled path component,
+  and unredacted runtime logs are excluded unless explicitly requested.
+- Compatibility checks now verify explicit streaming mode, runtime identity,
+  version, verdicts, failure classes, and `UNKNOWN` reasons.
+- CI uses a pinned Rust 1.85 toolchain, bounded jobs, and a consolidated
+  real-runtime matrix to reduce Actions usage.
 
-## [0.1.0]
+### Initial foundation
 
-First version: OpenAI Chat Completions provider, MCP stdio server,
-deterministic scenarios, conforming and faulty fixtures, and the OpenAI
-Agents SDK adapter.
+- OpenAI Chat Completions provider, MCP stdio server, deterministic scenarios,
+  conforming and faulty fixtures, and the OpenAI Agents SDK adapter.

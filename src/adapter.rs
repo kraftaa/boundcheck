@@ -86,16 +86,21 @@ impl Adapter {
         let parent: Vec<(String, String)> =
             std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
         let mut env = inherited(&parent, self.inherit_environment, &self.environment_passthrough);
-        let no_proxy = match parent.iter().find(|(k, _)| k == "NO_PROXY" || k == "no_proxy") {
-            Some((_, v)) if !v.is_empty() => format!("{v},127.0.0.1,localhost"),
-            _ => "127.0.0.1,localhost".to_owned(),
-        };
+        let no_proxy = no_proxy_value(&parent, self.inherit_environment, &self.environment_passthrough);
         env.retain(|(k, _)| k != "NO_PROXY" && k != "no_proxy");
         env.push(("NO_PROXY".into(), no_proxy.clone()));
         env.push(("no_proxy".into(), no_proxy));
         env.retain(|(k, _)| !rendered.iter().any(|(r, _)| r == k));
         env.extend(rendered.iter().cloned());
         env
+    }
+}
+
+fn no_proxy_value(parent: &[(String, String)], mode: InheritEnvironment, passthrough: &[String]) -> String {
+    let inherit = mode == InheritEnvironment::All || passthrough.iter().any(|k| k == "NO_PROXY" || k == "no_proxy");
+    match parent.iter().find(|(k, _)| inherit && (k == "NO_PROXY" || k == "no_proxy")) {
+        Some((_, v)) if !v.is_empty() => format!("{v},127.0.0.1,localhost"),
+        _ => "127.0.0.1,localhost".to_owned(),
     }
 }
 
@@ -409,6 +414,7 @@ mod tests {
             ("AWS_SECRET_ACCESS_KEY", "x"),
             ("GITHUB_TOKEN", "x"),
             ("OPENAI_BASE_URL", "https://real"),
+            ("NO_PROXY", "internal.corp,10.0.0.0/8"),
             ("VIRTUAL_ENV", "/v"),
         ]
         .iter()
@@ -417,7 +423,12 @@ mod tests {
         let names = |m, pass: &[String]| inherited(&parent, m, pass).into_iter().map(|(k, _)| k).collect::<Vec<_>>();
         assert_eq!(names(InheritEnvironment::Minimal, &[]), vec!["PATH", "HOME"]);
         assert_eq!(names(InheritEnvironment::Minimal, &["VIRTUAL_ENV".into()]), vec!["PATH", "HOME", "VIRTUAL_ENV"]);
-        assert_eq!(names(InheritEnvironment::All, &[]), vec!["PATH", "HOME", "VIRTUAL_ENV"]);
+        assert_eq!(names(InheritEnvironment::All, &[]), vec!["PATH", "HOME", "NO_PROXY", "VIRTUAL_ENV"]);
+        assert_eq!(no_proxy_value(&parent, InheritEnvironment::Minimal, &[]), "127.0.0.1,localhost");
+        assert_eq!(
+            no_proxy_value(&parent, InheritEnvironment::All, &[]),
+            "internal.corp,10.0.0.0/8,127.0.0.1,localhost"
+        );
     }
 
     #[test]

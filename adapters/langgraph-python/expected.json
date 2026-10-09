@@ -8,27 +8,33 @@
       "verdict": "PASS",
       "stream": {
         "verdict": "UNKNOWN",
+        "unknown_reasons": ["runtime-exited-early"],
         "why": "In streaming mode a cut-off SSE stream raises langchain_openai OpenAIConnectionError (Connection error.) and is not retried; non-streaming requests are retried and PASS."
       }
     },
     "mcp-protocol-error": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["runtime-exited-early"],
       "why": "langchain-mcp-adapters raises mcp McpError for a JSON-RPC error; the prebuilt ReAct agent does not catch it, so the run ends before a tool result is sent."
     },
     "mixed-content": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["unsupported-request-shape"],
       "why": "LangChain sends the image as an image_url part inside the role:tool message, a shape Chat Completions tool messages do not support; reported as an unsupported request shape."
     },
     "embedded-resource": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["unsupported-request-shape"],
       "why": "The blob resource (image/png) is sent as an image_url part inside the tool message, which Chat Completions tool messages do not support; reported as an unsupported request shape."
     },
     "resource-link": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["runtime-exited-early"],
       "why": "langchain-openai raises ValueError ('OpenAI Chat Completions does not support file URLs') and the run ends."
     },
     "audio-content": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["runtime-exited-early"],
       "why": "langchain-mcp-adapters raises NotImplementedError ('AudioContent conversion to LangChain content blocks is not yet supported') and the run ends."
     }
   }

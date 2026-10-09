@@ -782,6 +782,7 @@ fn faithful(def: &ScenarioDef, sim: &Sim) -> Result<(), String> {
             // Errors (JSON-RPC errors and isError results) only need their exact
             // content, in any wording around it, with the content's last character
             // left intact (no combining mark or joiner right after it).
+            #[allow(clippy::unnecessary_map_or)] // `is_none_or` is newer than the MSRV.
             let intact = |hay: &str, needle: &str| {
                 hay.match_indices(needle).any(|(i, _)| {
                     hay[i + needle.len()..].chars().next().map_or(true, |c| {

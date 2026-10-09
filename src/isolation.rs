@@ -93,6 +93,7 @@ pub fn plan(args: &RunArgs, engine: &str, image: &str, binary: &Path, cwd: &Path
         (args.probes, "--probes"),
         (args.artifacts_all, "--artifacts-all"),
         (args.save_headers, "--save-headers"),
+        (args.include_runtime_logs, "--include-runtime-logs"),
     ] {
         if on {
             inner.push(flag.into());

@@ -17,7 +17,7 @@ Fake MCP tool server  ->  runtime under test  ->  fake model provider
 
 ## Install
 
-From source (Rust 1.80 or later):
+From source (Rust 1.85 or later):
 
 ```bash
 cargo install --git https://github.com/kraftaa/boundcheck --locked boundarycheck
@@ -57,6 +57,7 @@ Both OpenAI Chat Completions and the OpenAI Responses API are supported. Results
 
 - [Usage, installation, CLI, scenarios, reports, and isolation](docs/usage.md)
 - [Writing runtime adapters](docs/adapters.md)
+- [JSON schemas for adapters and reports](schemas/)
 - [Technical design, verdicts, and security model](docs/technical-design.md)
 - [Development, tests, and fuzzing](docs/development.md)
 - [Runtime compatibility matrix](docs/compatibility.md)

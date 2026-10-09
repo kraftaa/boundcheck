@@ -8,23 +8,28 @@
       "verdict": "PASS",
       "stream": {
         "verdict": "UNKNOWN",
+        "unknown_reasons": ["runtime-exited-early"],
         "why": "In streaming mode a cut-off SSE stream raises pydantic_ai.exceptions.ModelAPIError (Connection error.) and is not retried; non-streaming requests are retried and PASS."
       }
     },
     "mixed-content": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["unrepresentable-content"],
       "why": "Chat Completions tool results cannot carry images; Pydantic AI moves the image elsewhere in the request (outside the tool message)."
     },
     "embedded-resource": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["unrepresentable-content"],
       "why": "Not representable; Pydantic AI drops both embedded resources (text blocks arrive unchanged)."
     },
     "resource-link": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["unrepresentable-content"],
       "why": "Not representable; Pydantic AI includes the resource_link (its URI) inside the tool text."
     },
     "audio-content": {
       "verdict": "UNKNOWN",
+      "unknown_reasons": ["unrepresentable-content"],
       "why": "Not representable; Pydantic AI moves the audio elsewhere in the request (outside the tool message)."
     }
   }

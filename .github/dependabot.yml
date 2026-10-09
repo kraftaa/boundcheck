@@ -4,7 +4,38 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
   - package-ecosystem: cargo
     directory: /
+    schedule:
+      interval: weekly
+    groups:
+      rust-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+    groups:
+      fuzz-rust-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+  - package-ecosystem: pip
+    directory: /adapters/openai-agents-python
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /adapters/pydantic-ai-python
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /adapters/langgraph-python
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /adapters/openai-agents-python
     schedule:
       interval: weekly

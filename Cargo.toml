@@ -5,7 +5,7 @@ edition = "2021"
 description = "Deterministic harness that verifies tool results survive the MCP -> runtime -> model-provider boundary"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/kraftaa/boundcheck"
-rust-version = "1.80"
+rust-version = "1.85"
 
 [lib]
 path = "src/lib.rs"

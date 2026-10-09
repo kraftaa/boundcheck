@@ -61,12 +61,16 @@ pub struct RunArgs {
     /// report shows what the runtime did with each block.
     #[arg(long, conflicts_with = "scenarios")]
     pub probes: bool,
-    /// Preserve the temporary work directory.
+    /// Preserve the temporary work directory, including unredacted runtime logs.
     #[arg(long)]
     pub keep_workdir: bool,
     /// Save provider request headers (credentials redacted) with the artifacts.
     #[arg(long, requires = "artifacts")]
     pub save_headers: bool,
+    /// Include unredacted runtime stdout/stderr in artifacts and the stderr
+    /// tail for UNKNOWN results. Runtime logs may contain secrets.
+    #[arg(long)]
+    pub include_runtime_logs: bool,
     /// `docker`: run boundarycheck and the runtime inside a locked-down container
     /// (no network, read-only root, only the current directory mounted read-only).
     #[arg(long, value_parser = ["none", "docker"], default_value = "none")]

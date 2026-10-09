@@ -78,7 +78,10 @@ The default, `inherit_environment: "minimal"`, passes only basic process setting
 - `OPENAI_*` and `BOUNDARYCHECK_*` variables;
 - names containing credential-like terms such as key, token, secret, auth, session, password, or credential.
 
-Names in `environment_passthrough` are explicit exceptions. Adapter-defined variables are applied last. `NO_PROXY` and `no_proxy` include `127.0.0.1,localhost`.
+Names in `environment_passthrough` are explicit exceptions. Adapter-defined variables are applied last. In minimal mode, parent `NO_PROXY` values are ignored unless explicitly passed through; `NO_PROXY` and `no_proxy` always include only the required loopback entries by default.
+
+The machine-readable manifest format is documented by
+[`schemas/adapter-v1.schema.json`](../schemas/adapter-v1.schema.json).
 
 ## Lifecycle capabilities
 

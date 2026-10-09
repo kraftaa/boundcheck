@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kraftaa/boundcheck/blob/main/schemas/adapter-v1.schema.json",
+  "title": "boundarycheck adapter manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "provider_protocol"],
+  "properties": {
+    "name": {"type": "string", "minLength": 1},
+    "description": {"type": "string"},
+    "provider_protocol": {
+      "enum": ["openai-chat-completions", "openai-responses"]
+    },
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"enum": ["history-replay", "persistence-resume"]}
+    },
+    "environment": {"$ref": "#/$defs/stringMap"},
+    "inherit_environment": {"enum": ["minimal", "all"]},
+    "environment_passthrough": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "args": {"$ref": "#/$defs/stringArray"},
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "content"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "content": {"type": "string"}
+        }
+      }
+    },
+    "stdin": {"type": "string"},
+    "resume": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "environment": {"$ref": "#/$defs/stringMap"},
+        "args": {"$ref": "#/$defs/stringArray"},
+        "stdin": {"type": "string"}
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {"const": "provider-request"},
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "completion": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {"const": "provider-scenario-complete"},
+            "exit_grace_seconds": {"type": "number", "minimum": 0}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {"type": {"const": "process-exit"}}
+        }
+      ]
+    },
+    "shutdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"grace_seconds": {"type": "number", "minimum": 0}}
+    },
+    "runtime_version": {
+      "oneOf": [
+        {"$ref": "#/$defs/tagOnly", "unevaluatedProperties": false},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "value"],
+          "properties": {
+            "type": {"const": "static"},
+            "value": {"type": "string"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "argv"],
+          "properties": {
+            "type": {"const": "command"},
+            "argv": {"$ref": "#/$defs/stringArray"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {"type": {"const": "report-file"}}
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "stringMap": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    },
+    "stringArray": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "tagOnly": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {"type": {"const": "unknown"}}
+    }
+  }
+}

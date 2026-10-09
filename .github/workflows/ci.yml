@@ -3,13 +3,20 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 # Third-party actions are pinned by full commit SHA (the tag is a comment).
-# Dependabot (.github/dependabot.yml) proposes updates.
+# Dependabot (.github/dependabot.yml) proposes grouped updates.
 jobs:
   test:
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -25,24 +32,15 @@ jobs:
       - run: rustup component add clippy rustfmt
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      - run: cargo test --all-targets --locked
+      - run: python3 scripts/check_markdown_links.py
+      - run: python3 -m json.tool schemas/adapter-v1.schema.json >/dev/null
+      - run: python3 -m json.tool schemas/report-v1.schema.json >/dev/null
 
   real-runtime:
-    # Each runtime is installed only from its hash-locked requirements and
-    # compared with its recorded baseline (docs/compatibility.md).
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        mode: ["", "--stream"]
-        runtime:
-          - { dir: openai-agents-python, adapter: openai-agents-python }
-          - { dir: pydantic-ai-python, adapter: pydantic-ai-python }
-          - { dir: langgraph-python, adapter: langgraph-python }
-        protocol:
-          - { suffix: "", flag: "", baseline: expected.json }
-          - { suffix: "-responses", flag: "--responses", baseline: expected-responses.json }
-    runs-on: ${{ matrix.os }}
+    # One job runs the matrix sequentially to avoid multiplying Actions jobs.
+    timeout-minutes: 40
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,41 +49,45 @@ jobs:
         with:
           python-version: "3.13"
       - run: cargo build --release --locked
-      - run: |
-          python -m venv .venv-runtime
-          .venv-runtime/bin/python -m pip install --require-hashes --no-deps \
-            -r adapters/${{ matrix.runtime.dir }}/requirements.lock
-          .venv-runtime/bin/python -m pip check
-      - name: Run boundarycheck against the pinned runtime
-        # Exit 1/3 are expected (documented runtime behavior, probes); the
-        # baseline check below decides. Exit 2 (harness error) fails the job.
+      - name: Check pinned runtimes against explicit baselines
         run: |
-          set +e
-          ./target/release/boundarycheck run --adapter ${{ matrix.runtime.adapter }}${{ matrix.protocol.suffix }} \
-            --extended --probes --report boundarycheck-report.json \
-            -- .venv-runtime/bin/python adapters/${{ matrix.runtime.dir }}/agent.py ${{ matrix.protocol.flag }} ${{ matrix.mode }}
-          code=$?
-          [ "$code" -ne 2 ] || exit 2
-      - name: Compare with the recorded compatibility baseline
-        run: python3 scripts/check_expected.py boundarycheck-report.json adapters/${{ matrix.runtime.dir }}/${{ matrix.protocol.baseline }}
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            python3 scripts/compat_matrix.py --runtime openai-agents --check-baselines --no-docs
+          else
+            python3 scripts/compat_matrix.py --check-baselines --no-docs
+          fi
 
   isolation:
-    # --isolation docker end to end: no network, no host files, no inherited secrets.
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: docker pull python:3.13-slim-trixie
+      - run: docker pull python:3.13-slim-trixie@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f
       - run: cargo test --locked --test integration docker_isolation -- --nocapture
         env:
-          BOUNDARYCHECK_DOCKER_IMAGE: python:3.13-slim-trixie
+          BOUNDARYCHECK_DOCKER_IMAGE: python:3.13-slim-trixie@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f
 
   audit:
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: cargo install cargo-audit --locked
+      - run: cargo install cargo-audit --version 0.22.2 --locked
       - run: cargo audit
+
+  ci-success:
+    if: always()
+    needs: [test, real-runtime, isolation, audit]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI job
+        env:
+          TEST: ${{ needs.test.result }}
+          REAL_RUNTIME: ${{ needs.real-runtime.result }}
+          ISOLATION: ${{ needs.isolation.result }}
+          AUDIT: ${{ needs.audit.result }}
+        run: test "$TEST $REAL_RUNTIME $ISOLATION $AUDIT" = "success success success success"

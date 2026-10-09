@@ -1,4 +1,4 @@
-use boundarycheck::{adapter, cli, isolation, mcp, model, process, report, runner, scenario};
+use boundarycheck::{adapter, cli, fs_secure, isolation, mcp, model, process, report, runner, scenario};
 
 use clap::Parser;
 use cli::{Cli, Cmd, RunArgs};
@@ -111,6 +111,7 @@ fn run(args: RunArgs) -> i32 {
         artifacts_all: args.artifacts_all,
         keep_workdir: args.keep_workdir,
         save_headers: args.save_headers,
+        include_runtime_logs: args.include_runtime_logs,
         on_scenario: Box::new(|s| println!("{}", report::render_scenario(s))),
     });
     let rt = &report.runtime;
@@ -147,16 +148,7 @@ fn run(args: RunArgs) -> i32 {
 
 /// Reports are created owner-only (0600), like the evidence artifacts.
 fn write_report(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    f.write_all(bytes)
+    fs_secure::write_private(path, bytes)
 }
 
 fn config_error(msg: &str) -> i32 {
