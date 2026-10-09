@@ -1,10 +1,15 @@
 //! Byte-level content helpers.
 
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
 }
 
 /// Characters that attach to the preceding character: combining marks,
