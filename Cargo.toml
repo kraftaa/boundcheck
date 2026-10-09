@@ -22,7 +22,7 @@ humantime = "2"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order", "raw_value"] }
-sha2 = "0.10"
+sha2 = "0.11"
 tempfile = "3"
 unicode-normalization = "0.1"
 
