@@ -334,6 +334,7 @@ fn append_locked(path: &Path, line: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
 
     #[test]
     fn records_evidence_before_responding() {
@@ -387,14 +388,15 @@ mod tests {
         let s = McpServer::new("BC_RUN_000001".into(), "concurrent-two-tools".into(), dir.path().join("ev.jsonl"));
         // CALL_1 sleeps in this scenario, so a flood of them overlaps.
         let calls = 3 * MAX_CONCURRENT_CALLS;
-        let input: String = (0..calls)
-            .map(|id| {
-                format!(
-                    "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"boundary_test\",\"arguments\":{{\"run_id\":\"BC_RUN_000001\",\"scenario\":\"concurrent-two-tools\",\"call_id\":\"{}\"}}}}}}\n",
-                    crate::scenario::CALL_1
-                )
-            })
-            .collect();
+        let mut input = String::new();
+        for id in 0..calls {
+            writeln!(
+                input,
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"boundary_test\",\"arguments\":{{\"run_id\":\"BC_RUN_000001\",\"scenario\":\"concurrent-two-tools\",\"call_id\":\"{}\"}}}}}}",
+                crate::scenario::CALL_1
+            )
+            .expect("writing to a String cannot fail");
+        }
         let mut out = Vec::new();
         s.run(input.as_bytes(), &mut out).unwrap();
         assert_eq!(out.split(|b| *b == b'\n').filter(|l| !l.is_empty()).count(), calls, "every call is answered");
