@@ -879,3 +879,37 @@ fn every_illegal_mutation_is_rejected_by_oracle_and_evaluator() {
         }
     }
 }
+
+/// The evidence log is runtime-writable, so the whole recorded response is
+/// re-derived from the generator: tampering that keeps the text but changes
+/// `structuredContent` or `_meta` must not go unnoticed.
+#[test]
+fn tampered_structured_content_or_meta_is_evidence_inconsistent() {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    for (sid, pointer) in
+        [("structured-content", "/result/structuredContent"), ("error-with-metadata", "/result/_meta")]
+    {
+        let def = scenario::find(sid).unwrap();
+        let (mcp, _) = mcp_results(sid);
+        let (sim, applied) = simulate(def, &Mutation::None, Stage::Delivery(0), Wire::Chat);
+        assert!(!applied);
+        assert_eq!(compare::evaluate(&sim.machine, mcp, vec![]).verdict, Verdict::Pass, "{sid} untampered");
+        let tampered: Vec<McpEvidence> = mcp
+            .iter()
+            .cloned()
+            .map(|mut r| {
+                if let Some(raw) = &r.response_b64 {
+                    let mut v: Value = serde_json::from_slice(&b64.decode(raw).unwrap()).unwrap();
+                    *v.pointer_mut(pointer).unwrap_or_else(|| panic!("{sid} has {pointer}")) =
+                        json!({"tampered": true});
+                    r.response_b64 = Some(b64.encode(serde_json::to_vec(&v).unwrap()));
+                }
+                r
+            })
+            .collect();
+        let eval = compare::evaluate(&sim.machine, &tampered, vec![]);
+        assert_ne!(eval.verdict, Verdict::Pass, "{sid}");
+        assert!(eval.unknowns.iter().any(|u| u.reason.name() == "evidence-inconsistent"), "{sid}: {:?}", eval.unknowns);
+    }
+}

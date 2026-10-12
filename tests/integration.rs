@@ -6,6 +6,27 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const BIN: &str = env!("CARGO_BIN_EXE_boundarycheck");
+/// `--timeout` for tests whose runtime hangs on purpose. It must leave room for
+/// Python to start and send its first request on a loaded machine; otherwise
+/// the run correctly ends as `startup-timeout` instead of the timeout under test.
+const SLOW_TIMEOUT: &str = "10";
+
+/// Whether the process `pid` has gone within a few seconds (polling, so a
+/// loaded machine does not turn a slow exit into a failure).
+fn gone_soon(pid: &str) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let alive =
+            Command::new("kill").args(["-0", pid]).stderr(std::process::Stdio::null()).status().unwrap().success();
+        if !alive {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
 
 struct Run {
     code: i32,
@@ -376,22 +397,15 @@ fn hanging_runtime_times_out_and_is_killed() {
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("agent.pid");
     let r = boundarycheck(
-        &["--scenario", "exact-text", "--timeout", "3"],
+        &["--scenario", "exact-text", "--timeout", SLOW_TIMEOUT],
         &["python3", "fixtures/faulty-agent/agent.py", "--fault", "hang", "--pid-file", pid_file.to_str().unwrap()],
     );
     assert_eq!(r.code, 3, "{}", r.stdout);
     let s = scenario(&r, "exact-text");
     assert_eq!(s["unknowns"][0]["reason"], "scenario-timeout");
     assert_eq!(s["process"]["terminated_by_harness"], true);
-    let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    let alive = Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stderr(std::process::Stdio::null())
-        .status()
-        .unwrap()
-        .success();
-    assert!(!alive, "runtime process {pid} must be terminated");
+    let pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_owned();
+    assert!(gone_soon(&pid), "runtime process {pid} must be terminated");
 }
 
 #[test]
@@ -589,14 +603,12 @@ fn processes_that_leave_the_process_group_are_killed() {
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("escapee.pid");
     let r = boundarycheck(
-        &["--scenario", "exact-text", "--timeout", "3"],
+        &["--scenario", "exact-text", "--timeout", SLOW_TIMEOUT],
         &["python3", "fixtures/faulty-agent/agent.py", "--fault", "escape", "--pid-file", pid_file.to_str().unwrap()],
     );
     assert_eq!(r.code, 3, "{}", r.stdout);
     let pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_owned();
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let alive = Command::new("kill").args(["-0", &pid]).stderr(std::process::Stdio::null()).status().unwrap().success();
-    assert!(!alive, "setsid() child {pid} must be terminated");
+    assert!(gone_soon(&pid), "setsid() child {pid} must be terminated");
 }
 
 #[test]
@@ -627,10 +639,7 @@ fn interrupt_kills_children_and_removes_workdir() {
     let agent_pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_owned();
     Command::new("kill").args(["-INT", &child.id().to_string()]).status().unwrap();
     assert_eq!(child.wait().unwrap().code(), Some(2));
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let alive =
-        Command::new("kill").args(["-0", &agent_pid]).stderr(std::process::Stdio::null()).status().unwrap().success();
-    assert!(!alive, "runtime {agent_pid} must be terminated on interrupt");
+    assert!(gone_soon(&agent_pid), "runtime {agent_pid} must be terminated on interrupt");
     let leftovers: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .flatten()

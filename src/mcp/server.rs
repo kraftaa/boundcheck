@@ -12,11 +12,17 @@ use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+/// Longest accepted JSON-RPC line. Requests to this server are a few hundred
+/// bytes; anything longer is answered with an error and discarded.
+pub const MAX_LINE_BYTES: usize = 1 << 20;
+/// Tool calls in progress at once. When all slots are busy, the reader stops
+/// reading stdin until one frees up.
+pub const MAX_CONCURRENT_CALLS: usize = 16;
 
 #[derive(Clone)]
 pub struct McpServer {
@@ -24,6 +30,8 @@ pub struct McpServer {
     scenario: String,
     evidence: PathBuf,
     seq: Arc<AtomicU64>,
+    in_flight: Arc<AtomicUsize>,
+    peak_in_flight: Arc<AtomicUsize>,
 }
 
 pub fn serve(run_id: String, scenario: String, evidence: PathBuf) -> i32 {
@@ -39,7 +47,20 @@ pub fn serve(run_id: String, scenario: String, evidence: PathBuf) -> i32 {
 
 impl McpServer {
     pub fn new(run_id: String, scenario: String, evidence: PathBuf) -> Self {
-        McpServer { run_id, scenario, evidence, seq: Arc::new(AtomicU64::new(0)) }
+        McpServer {
+            run_id,
+            scenario,
+            evidence,
+            seq: Arc::new(AtomicU64::new(0)),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            peak_in_flight: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// The most tool calls that were in progress at the same time.
+    #[cfg(test)]
+    fn peak_concurrent_calls(&self) -> usize {
+        self.peak_in_flight.load(Ordering::Acquire)
     }
 
     /// Serve newline-delimited JSON-RPC from `input` until EOF.
@@ -66,10 +87,20 @@ impl McpServer {
             });
             let mut input = input;
             let mut line = Vec::new();
-            loop {
-                line.clear();
-                if input.read_until(b'\n', &mut line)? == 0 {
-                    break;
+            // A counting semaphore: each tool call takes a slot and returns it when done.
+            let (slot_tx, slot_rx) = mpsc::sync_channel::<()>(MAX_CONCURRENT_CALLS);
+            for _ in 0..MAX_CONCURRENT_CALLS {
+                slot_tx.send(()).expect("slot channel has capacity");
+            }
+            while let Some(complete) = read_line_capped(&mut input, &mut line, MAX_LINE_BYTES)? {
+                if !complete {
+                    tx.send(Ok(error_response(
+                        Value::Null,
+                        -32600,
+                        &format!("request line exceeds {MAX_LINE_BYTES} bytes"),
+                    )))
+                    .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "MCP writer stopped"))?;
+                    continue;
                 }
                 let trimmed = trim(&line);
                 if trimmed.is_empty() {
@@ -84,14 +115,23 @@ impl McpServer {
                     }
                 };
                 if msg.get("method").and_then(Value::as_str) == Some("tools/call") {
-                    let (server, tx) = (self.clone(), tx.clone());
-                    scope.spawn(move || match server.handle(&msg) {
-                        Ok(Some(response)) => {
-                            let _ = tx.send(Ok(response));
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            let _ = tx.send(Err(error));
+                    // Blocks while every slot is taken. Cannot fail: `slot_tx` is alive.
+                    slot_rx.recv().expect("slot sender is alive");
+                    let (server, tx, slot_tx) = (self.clone(), tx.clone(), slot_tx.clone());
+                    scope.spawn(move || {
+                        let now = server.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+                        server.peak_in_flight.fetch_max(now, Ordering::AcqRel);
+                        let handled = server.handle(&msg);
+                        server.in_flight.fetch_sub(1, Ordering::AcqRel);
+                        let _ = slot_tx.send(());
+                        match handled {
+                            Ok(Some(response)) => {
+                                let _ = tx.send(Ok(response));
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                let _ = tx.send(Err(error));
+                            }
                         }
                     });
                 } else if let Some(response) = self.handle(&msg)? {
@@ -169,20 +209,7 @@ impl McpServer {
             is_error: true,
             ..payload::Payload::default()
         });
-        let bytes = if let Some((code, message)) = &payload.protocol_error {
-            error_response(id.clone(), *code, message)
-        } else {
-            let mut result = serde_json::Map::new();
-            result.insert("content".into(), Value::Array(payload.content_items()));
-            if let Some(s) = payload.structured {
-                result.insert("structuredContent".into(), s);
-            }
-            result.insert("isError".into(), Value::Bool(payload.is_error));
-            if let Some(m) = payload.meta {
-                result.insert("_meta".into(), m);
-            }
-            encode(&json!({"jsonrpc": "2.0", "id": id, "result": Value::Object(result)}))
-        };
+        let bytes = response_bytes(id.clone(), &payload);
         let seq = self.next_seq();
         self.record(McpEvidence {
             event: "tool-response".into(),
@@ -201,6 +228,24 @@ impl McpServer {
     fn record(&self, ev: McpEvidence) -> io::Result<()> {
         append_locked(&self.evidence, &encode(&serde_json::to_value(ev)?))
     }
+}
+
+/// The exact JSON-RPC response line (without `\n`) for a tools/call payload.
+/// The comparison uses it to re-derive the full response from the generator.
+pub fn response_bytes(id: Value, payload: &payload::Payload) -> Vec<u8> {
+    if let Some((code, message)) = &payload.protocol_error {
+        return error_response(id, *code, message);
+    }
+    let mut result = serde_json::Map::new();
+    result.insert("content".into(), Value::Array(payload.content_items()));
+    if let Some(s) = &payload.structured {
+        result.insert("structuredContent".into(), s.clone());
+    }
+    result.insert("isError".into(), Value::Bool(payload.is_error));
+    if let Some(m) = &payload.meta {
+        result.insert("_meta".into(), m.clone());
+    }
+    encode(&json!({"jsonrpc": "2.0", "id": id, "result": Value::Object(result)}))
 }
 
 pub fn tool_definition() -> Value {
@@ -234,6 +279,38 @@ fn write_line(out: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     out.flush()
 }
 
+/// Read one `\n`-terminated line into `line`, keeping at most `max` bytes.
+/// Returns `None` at EOF, `Some(true)` for a complete line and `Some(false)`
+/// for a line that was longer than `max` (the rest of it is consumed and
+/// discarded, so the next call starts at the following line).
+fn read_line_capped(input: &mut impl BufRead, line: &mut Vec<u8>, max: usize) -> io::Result<Option<bool>> {
+    line.clear();
+    let (mut read_any, mut overlong) = (false, false);
+    loop {
+        let buf = input.fill_buf()?;
+        if buf.is_empty() {
+            return Ok(read_any.then_some(!overlong));
+        }
+        read_any = true;
+        let (chunk, done) = match buf.iter().position(|b| *b == b'\n') {
+            Some(i) => (&buf[..=i], true),
+            None => (buf, false),
+        };
+        if !overlong && line.len() + chunk.len() > max {
+            overlong = true;
+            line.clear();
+        }
+        if !overlong {
+            line.extend_from_slice(chunk);
+        }
+        let n = chunk.len();
+        input.consume(n);
+        if done {
+            return Ok(Some(!overlong));
+        }
+    }
+}
+
 fn trim(b: &[u8]) -> &[u8] {
     let start = b.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(b.len());
     let end = b.iter().rposition(|c| !c.is_ascii_whitespace()).map_or(start, |i| i + 1);
@@ -262,12 +339,7 @@ mod tests {
     fn records_evidence_before_responding() {
         let dir = tempfile::tempdir().unwrap();
         let ev = dir.path().join("ev.jsonl");
-        let s = McpServer {
-            run_id: "BC_RUN_000001".into(),
-            scenario: "exact-text".into(),
-            evidence: ev.clone(),
-            seq: Arc::new(AtomicU64::new(0)),
-        };
+        let s = McpServer::new("BC_RUN_000001".into(), "exact-text".into(), ev.clone());
         let input = concat!(
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
             "\n",
@@ -292,12 +364,7 @@ mod tests {
     fn concurrent_calls_can_finish_in_reverse_order() {
         let dir = tempfile::tempdir().unwrap();
         let ev = dir.path().join("ev.jsonl");
-        let s = McpServer {
-            run_id: "BC_RUN_000001".into(),
-            scenario: "concurrent-two-tools".into(),
-            evidence: ev,
-            seq: Arc::new(AtomicU64::new(0)),
-        };
+        let s = McpServer::new("BC_RUN_000001".into(), "concurrent-two-tools".into(), ev);
         let call = |id: u64, call_id: &str| {
             format!(
                 r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"boundary_test","arguments":{{"run_id":"BC_RUN_000001","scenario":"concurrent-two-tools","call_id":"{call_id}"}}}}}}"#
@@ -312,6 +379,55 @@ mod tests {
             .map(|line| serde_json::from_slice::<Value>(line).unwrap()["id"].as_u64().unwrap())
             .collect();
         assert_eq!(ids, vec![2, 1]);
+    }
+
+    #[test]
+    fn concurrent_tool_calls_never_exceed_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = McpServer::new("BC_RUN_000001".into(), "concurrent-two-tools".into(), dir.path().join("ev.jsonl"));
+        // CALL_1 sleeps in this scenario, so a flood of them overlaps.
+        let calls = 3 * MAX_CONCURRENT_CALLS;
+        let input: String = (0..calls)
+            .map(|id| {
+                format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"boundary_test\",\"arguments\":{{\"run_id\":\"BC_RUN_000001\",\"scenario\":\"concurrent-two-tools\",\"call_id\":\"{}\"}}}}}}\n",
+                    crate::scenario::CALL_1
+                )
+            })
+            .collect();
+        let mut out = Vec::new();
+        s.run(input.as_bytes(), &mut out).unwrap();
+        assert_eq!(out.split(|b| *b == b'\n').filter(|l| !l.is_empty()).count(), calls, "every call is answered");
+        let peak = s.peak_concurrent_calls();
+        assert!(peak <= MAX_CONCURRENT_CALLS, "{peak} calls ran at once");
+        assert!(peak > 1, "calls should overlap up to the limit");
+    }
+
+    #[test]
+    fn overlong_lines_are_rejected_and_the_next_line_is_served() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = McpServer::new("BC_RUN_000001".into(), "exact-text".into(), dir.path().join("ev.jsonl"));
+        let mut input = vec![b'x'; MAX_LINE_BYTES + 1];
+        input.extend_from_slice(b"\n{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n");
+        let mut out = Vec::new();
+        s.run(input.as_slice(), &mut out).unwrap();
+        let lines: Vec<Value> =
+            out.split(|b| *b == b'\n').filter(|l| !l.is_empty()).map(|l| serde_json::from_slice(l).unwrap()).collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["error"]["code"], -32600);
+        assert_eq!(lines[1]["id"], 7);
+    }
+
+    #[test]
+    fn capped_reader_handles_eof_and_exact_limit() {
+        let mut line = Vec::new();
+        let mut r: &[u8] = b"abc\nabcd\nlast";
+        assert_eq!(read_line_capped(&mut r, &mut line, 4).unwrap(), Some(true));
+        assert_eq!(line, b"abc\n");
+        assert_eq!(read_line_capped(&mut r, &mut line, 4).unwrap(), Some(false));
+        assert_eq!(read_line_capped(&mut r, &mut line, 4).unwrap(), Some(true));
+        assert_eq!(line, b"last");
+        assert_eq!(read_line_capped(&mut r, &mut line, 4).unwrap(), None);
     }
 
     #[test]

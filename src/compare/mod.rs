@@ -9,6 +9,7 @@ use crate::compare::classify::{classify_text, TextDifference};
 use crate::compare::content::sha256_hex;
 use crate::compare::json::JsonDiff;
 use crate::mcp::payload;
+use crate::mcp::server as mcp_server;
 use crate::model::content::{self as mcp_content, Block, Representable};
 use crate::model::observation::{McpEvidence, ProviderObservation, ToolObservation};
 use crate::model::verdict::{decide, FailureClass, UnknownNote, UnknownReason, Verdict};
@@ -298,10 +299,12 @@ pub fn evaluate(machine: &ScenarioMachine, mcp: &[McpEvidence], runner_unknowns:
             ));
         }
         // Independent integrity check: the evidence log lives in a directory the
-        // runtime can write to, so cross-check it against the generator.
+        // runtime can write to, so cross-check the whole recorded response
+        // (content, structuredContent, _meta, error state) against the generator.
         if first.generated {
-            match payload::generate(&machine.run_id, def.id, call) {
-                Some(p) if p.text.as_bytes() == first.extracted_content.as_slice() && p.is_error == first.is_error => {}
+            let id = serde_json::from_slice::<Value>(&first.raw_transport).ok().and_then(|v| v.get("id").cloned());
+            match (payload::generate(&machine.run_id, def.id, call), id) {
+                (Some(p), Some(id)) if mcp_server::response_bytes(id.clone(), &p) == first.raw_transport => {}
                 _ => unknowns.push(UnknownNote::new(
                     UnknownReason::EvidenceInconsistent,
                     format!("MCP evidence for {call} does not match the deterministic payload generator"),

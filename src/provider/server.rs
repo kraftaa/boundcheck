@@ -246,8 +246,35 @@ fn read_request(reader: &mut impl BufRead, writer: &mut impl Write) -> io::Resul
         }
     }
     let header = |name: &str| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
-    let close = header("connection").is_some_and(|v| v.eq_ignore_ascii_case("close")) || version == Some("HTTP/1.0");
-    if header("expect").is_some_and(|v| v.eq_ignore_ascii_case("100-continue")) {
+    let mut close =
+        header("connection").is_some_and(|v| v.eq_ignore_ascii_case("close")) || version == Some("HTTP/1.0");
+    // Framing a real provider would reject is rejected here too, so a runtime
+    // that sends it cannot pass: Transfer-Encoding other than a single
+    // `chunked`, Transfer-Encoding together with Content-Length, and a
+    // malformed or disagreeing Content-Length value. A request with neither
+    // header has an empty body, which the scenario reports as unparseable.
+    let framing_error = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_owned());
+    let values = |name: &str| -> Vec<&str> {
+        headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str()).collect()
+    };
+    let transfer_encodings = values("transfer-encoding");
+    let lengths = values("content-length")
+        .into_iter()
+        .map(|v| v.parse::<usize>().map_err(|_| framing_error("bad content-length")))
+        .collect::<io::Result<Vec<usize>>>()?;
+    let chunked = match transfer_encodings.as_slice() {
+        [] => false,
+        [te] if te.eq_ignore_ascii_case("chunked") && lengths.is_empty() => true,
+        _ => return Err(framing_error("ambiguous or unsupported transfer-encoding")),
+    };
+    if lengths.windows(2).any(|w| w[0] != w[1]) {
+        return Err(framing_error("conflicting content-length values"));
+    }
+    let declared = lengths.first().copied();
+    // An oversized declared body is not read: the request is answered as too
+    // large and the connection is closed, since the unread body is still on it.
+    let oversized = declared.is_some_and(|len| len > MAX_BODY_BYTES);
+    if !oversized && header("expect").is_some_and(|v| v.eq_ignore_ascii_case("100-continue")) {
         writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
     }
     let mut body = Vec::new();
@@ -260,7 +287,7 @@ fn read_request(reader: &mut impl BufRead, writer: &mut impl Write) -> io::Resul
             body.truncate(MAX_BODY_BYTES);
         }
     };
-    if header("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked")) {
+    if chunked {
         loop {
             let mut size_budget = 1024;
             let size_line = read_line(reader, &mut size_budget)?.ok_or(io::ErrorKind::UnexpectedEof)?;
@@ -280,7 +307,10 @@ fn read_request(reader: &mut impl BufRead, writer: &mut impl Write) -> io::Resul
             let mut crlf = [0u8; 2];
             reader.read_exact(&mut crlf)?;
         }
-    } else if let Some(len) = header("content-length").and_then(|v| v.parse::<usize>().ok()) {
+    } else if oversized {
+        truncated = true;
+        close = true;
+    } else if let Some(len) = declared {
         copy_exact(reader, len, |c| keep(c, &mut body))?;
     }
     Ok(Some(Request {
@@ -404,8 +434,32 @@ mod tests {
         ] {
             assert!(parse_requests(bad).is_empty(), "{:?}", String::from_utf8_lossy(bad));
         }
+        for ambiguous in [
+            &b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\n\r\n0\r\n\r\n"[..],
+            b"POST /x HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n",
+            b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+            b"POST /x HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabcd",
+            b"POST /x HTTP/1.1\r\nContent-Length: three\r\n\r\nabc",
+        ] {
+            assert!(parse_requests(ambiguous).is_empty(), "{:?}", String::from_utf8_lossy(ambiguous));
+        }
+        let repeated = b"POST /x HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabc";
+        assert_eq!(parse_requests(repeated), [("POST".into(), "/x".into(), 3, false)]);
         let huge_header = format!("GET / HTTP/1.1\r\nX: {}\r\n\r\n", "a".repeat(70_000));
         assert!(parse_requests(huge_header.as_bytes()).is_empty(), "header budget enforced");
+    }
+
+    #[test]
+    fn oversized_declared_body_is_rejected_without_reading_it() {
+        let head = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",
+            MAX_BODY_BYTES + 1
+        );
+        let mut reader = BufReader::new(head.as_bytes());
+        let mut written = Vec::new();
+        let req = read_request(&mut reader, &mut written).unwrap().unwrap();
+        assert!(req.body_truncated && req.close && req.body.is_empty());
+        assert!(written.is_empty(), "no 100 Continue for a body that will be refused");
     }
 
     #[test]
