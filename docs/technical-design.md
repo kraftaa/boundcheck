@@ -99,15 +99,15 @@ boundarycheck is intended for controlled test agents, not hostile code.
 
 Protections include:
 
-- minimal environment inheritance by default;
+- minimal environment inheritance by default (`inherit_environment: "all"` filters by variable name only; see [environment inheritance](adapters.md#environment-inheritance));
 - credential-name and common-token redaction;
 - opt-in request headers with sensitive values redacted;
 - owner-only artifact and report permissions;
 - component-by-component `openat`/`O_NOFOLLOW` checks for evidence, report, and artifact paths;
 - runtime stdout/stderr excluded from reports and artifacts unless explicitly requested;
-- bounded requests, artifacts, and captured output;
+- bounded provider requests (64 KiB of headers, 32 MiB of body; an oversized declared body is refused unread, and ambiguous `Content-Length`/`Transfer-Encoding` framing is rejected), MCP requests (1 MiB per line, 16 concurrent tool calls), artifacts, and captured output;
 - process-group and descendant cleanup on timeout or interruption;
-- evidence cross-checking against the deterministic payload generator.
+- evidence cross-checking: every recorded MCP response, including `structuredContent`, `_meta`, and error state, is re-derived from the deterministic payload generator.
 
 `--isolation docker` additionally removes network access, mounts the project read-only, uses a read-only root filesystem and in-memory temporary directory, drops Linux capabilities, limits processes, and exposes only output directories as writable.
 
@@ -128,6 +128,8 @@ than a false pass or failure.
 - Only MCP over stdio is supported.
 - Some MCP blocks cannot be represented by Chat Completions. Those probes return `UNKNOWN` when text remains intact; the Responses API can carry images.
 - Provider function-result formats cannot represent the MCP error flag directly, so error content is checked.
+- MCP `_meta` is protocol metadata, not content for the model, so it is not compared with the provider-visible result. It is still covered by the evidence cross-check.
+- Linux and macOS only. Windows is not supported: process-group cleanup, `O_NOFOLLOW` path checks, and evidence locking use Unix APIs.
 - Replay and persistence tests require explicit runtime support.
 - A fresh process per scenario may be slow for expensive runtimes.
 - On macOS, an already-orphaned process that escaped its process group can be reparented beyond the harness's process tree. Linux subreaper support closes this gap there.

@@ -78,6 +78,8 @@ The default, `inherit_environment: "minimal"`, passes only basic process setting
 - `OPENAI_*` and `BOUNDARYCHECK_*` variables;
 - names containing credential-like terms such as key, token, secret, auth, session, password, or credential.
 
+This filter matches names, not values. Secrets in variables whose names do not look like credentials, such as `DATABASE_URL`, `SENTRY_DSN`, or `SLACK_WEBHOOK_URL`, are passed to the runtime unchanged. Without `--isolation docker` the runtime also has network access. Prefer `minimal` with an explicit `environment_passthrough` list, and use `all` only in a clean environment.
+
 Names in `environment_passthrough` are explicit exceptions. Adapter-defined variables are applied last. In minimal mode, parent `NO_PROXY` values are ignored unless explicitly passed through; `NO_PROXY` and `no_proxy` always include only the required loopback entries by default.
 
 The machine-readable manifest format is documented by

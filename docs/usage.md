@@ -16,6 +16,10 @@ gh attestation verify boundarycheck-v0.1.0-aarch64-apple-darwin.tar.gz \
   --repo kraftaa/boundcheck
 ```
 
+A release archive contains the `boundarycheck` binary, `docs/`, `schemas/`, and the scripts the built-in adapters launch: `fixtures/` and `adapters/<runtime>/` with their pinned requirements. Run the examples from the extracted directory, since commands such as `python3 fixtures/conforming-agent/agent.py` use relative paths. Archives for v0.1.0 contain only the binary and top-level documents; for that release, use a clone of the repository instead.
+
+Linux and macOS are supported. Windows is not.
+
 ## Basic use
 
 ```text
@@ -157,4 +161,4 @@ The image must contain all runtime dependencies because downloads are disabled. 
 
 ## Real-runtime demonstration
 
-`scripts/demo.sh` builds the project and runs the pinned OpenAI Agents SDK plus the conforming and deliberately faulty fixtures. See [demo.md](demo.md) for recorded output and [compatibility.md](compatibility.md) for the full runtime matrix.
+From a source checkout, `scripts/demo.sh` builds the project and runs the pinned OpenAI Agents SDK plus the conforming and deliberately faulty fixtures. See [demo.md](demo.md) for recorded output and [compatibility.md](compatibility.md) for the full runtime matrix.

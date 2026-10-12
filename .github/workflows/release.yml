@@ -60,6 +60,9 @@ jobs:
           name=boundarycheck-${GITHUB_REF_NAME}-${{ matrix.target }}
           mkdir -p dist/$name
           cp target/${{ matrix.target }}/release/boundarycheck README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md SECURITY.md dist/$name/
+          # The fixtures and adapter scripts that the built-in adapters launch, and
+          # the docs and schemas the README links to, so they work after extraction.
+          cp -R adapters fixtures docs schemas dist/$name/
           tar -C dist -czf dist/$name.tar.gz $name
           (cd dist && shasum -a 256 $name.tar.gz > $name.tar.gz.sha256)
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2

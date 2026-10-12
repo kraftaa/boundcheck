@@ -27,7 +27,7 @@ From source (Rust 1.85 or later):
 cargo install --git https://github.com/kraftaa/boundcheck --locked boundarycheck
 ```
 
-Prebuilt Linux and macOS binaries, checksums, and provenance attestations are available on the [Releases page](https://github.com/kraftaa/boundcheck/releases).
+Prebuilt Linux and macOS binaries, checksums, and provenance attestations are available on the [Releases page](https://github.com/kraftaa/boundcheck/releases). Archives after v0.1.0 include the docs, schemas, example fixtures, and real-runtime adapter scripts; run the examples from the extracted directory. Windows is not supported.
 
 ## Quick start
 
@@ -43,7 +43,7 @@ $BC run --adapter fixture-agent -- \
   python3 fixtures/faulty-agent/agent.py --fault head-tail,swap
 ```
 
-Save a machine-readable report with `--report boundarycheck-report.json`. Run `scripts/demo.sh` for the pinned real-runtime demonstration.
+Save a machine-readable report with `--report boundarycheck-report.json`. From a source checkout, run `scripts/demo.sh` for the pinned real-runtime demonstration.
 
 No provider credentials or real model calls are needed. Use boundarycheck with controlled test agents; use [Docker isolation](docs/usage.md#docker-isolation) for untrusted runtimes.
 

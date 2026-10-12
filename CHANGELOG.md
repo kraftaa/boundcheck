@@ -5,6 +5,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- The fake MCP server refuses request lines over 1 MiB (JSON-RPC error, then
+  continues with the next line) and handles at most 16 tool calls
+  concurrently; further calls wait.
+- The fake provider refuses a declared body over 32 MiB without reading it,
+  and rejects ambiguous framing: `Transfer-Encoding` with `Content-Length`,
+  any `Transfer-Encoding` other than a single `chunked`, and malformed or
+  conflicting `Content-Length` values.
+- The evidence cross-check now re-derives the complete MCP response from the
+  generator, so tampering with `structuredContent` or `_meta` is
+  `evidence-inconsistent`; previously only the text and error flag were
+  checked.
+- Release archives now include `adapters/`, `fixtures/`, `docs/`, and
+  `schemas/`, so the built-in adapters' scripts, the examples, and the
+  README's links work after extraction. v0.1.0 archives are unchanged.
+
+### Fixed
+- Timeout and process-cleanup integration tests no longer fail on a loaded
+  machine.
+
+### Documentation
+- `inherit_environment: "all"` filters by variable name only; the docs now
+  say so and recommend `minimal`.
+- Windows is not supported; the docs now say so.
+
 ## [0.1.0] - 2026-10-09
 
 ### Added
